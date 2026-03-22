@@ -2,43 +2,54 @@
 #include "logger.hpp"
 #include "recorder.hpp"
 #include "transcriber.hpp"
+#include "llm.hpp"
+#include "executor.hpp"
+#include "tts.hpp"
 #include <thread>
 #include <chrono>
-#include <string>
-#include <cstdlib>
 
 Daemon::Daemon(std::atomic<bool>& flag, std::atomic<bool>& trigger)
     : shutdownRequested(flag), triggerReceived(trigger) {}
 
 void Daemon::run() {
-    Logger::info("Daemon started. Entering event loop.");
+    Logger::info("Initializing pipeline...");
 
     Recorder    recorder("/tmp/ai-agent-recording.wav");
-    const char* modelEnv = std::getenv("AI_AGENT_MODEL");
-    std::string modelPath = modelEnv ? modelEnv : "/home/Aurelius/Documents/AdoVs/whisper.cpp/models/ggml-base.en.bin";
-    Transcriber transcriber(modelPath);
+    Transcriber transcriber("/home/Aurelius/Documents/AdoVs/whisper.cpp/models/ggml-small.en.bin");
+    LLM         llm("qwen2.5-coder:14b");
+    Executor    executor;
+    TTS         tts("/home/Aurelius/.local/share/piper/en_US-lessac-medium.onnx");
+
+    Logger::info("ARIA ready. Waiting for trigger.");
 
     while (!shutdownRequested.load()) {
         if (triggerReceived.exchange(false)) {
             if (recorder.isRecording()) {
-                recorder.toggle();  // stop
+                recorder.toggle(); // stop
 
-                const std::string wavPath = recorder.getOutputPath();
-                Logger::info("Transcribing file: " + wavPath);
-                auto t0 = std::chrono::steady_clock::now();
                 std::string text = transcriber.transcribe(recorder.getOutputPath());
-                auto t1 = std::chrono::steady_clock::now();
-                auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
-                Logger::info("Transcribe finished in " + std::to_string(ms) + " ms.");
 
-                if (!text.empty()) {
-                    Logger::info("Transcription: " + text);
-                    // Phase 4: pass text to LLM here
+                if (text.empty() || text.find("[BLANK_AUDIO]") != std::string::npos) {
+                    Logger::warn("No speech detected.");
+                    tts.speak("I didn't catch that.");
                 } else {
-                    Logger::warn("Transcription returned empty.");
+                    Logger::info("You said: " + text);
+                    auto response = llm.think(text);
+
+                    if (response.hasAction()) {
+                        Logger::info("Action: " + response.action.type +
+                                     " → " + response.action.param);
+                        std::string feedback = executor.execute(response.action);
+                        if (response.speech.empty() && !feedback.empty())
+                            tts.speak(feedback);
+                    }
+
+                    if (!response.speech.empty())
+                        tts.speak(response.speech);
                 }
             } else {
-                recorder.toggle();  // start
+                recorder.toggle(); // start
+                Logger::info("Listening...");
             }
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(100));

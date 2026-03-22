@@ -4,27 +4,21 @@
 #include <atomic>
 #include <cstdlib>
 #include <string>
-#include <iostream>
+#include <curl/curl.h>
 
 std::atomic<bool> shutdownRequested{false};
 std::atomic<bool> triggerReceived{false};
 
-void signalHandler(int) {
-    shutdownRequested.store(true);
-}
-void triggerHandler(int) {
-    triggerReceived.store(true);
-}
+void signalHandler(int)  { shutdownRequested.store(true); }
+void triggerHandler(int) { triggerReceived.store(true); }
 
 int main() {
-    // Safe HOME resolution with fallback
-    const char* home = std::getenv("HOME");
-    std::string logPath = home ? std::string(home) + "/.ai-agent.log"
-                               : "/tmp/ai-agent.log";
+    curl_global_init(CURL_GLOBAL_DEFAULT);
 
+    const char* home = std::getenv("HOME");
+    std::string logPath = home ? std::string(home) + "/.ai-agent.log" : "/tmp/ai-agent.log";
     Logger::init(logPath);
 
-    // sigaction instead of std::signal
     struct sigaction sa{};
     sa.sa_handler = signalHandler;
     sigemptyset(&sa.sa_mask);
@@ -32,7 +26,6 @@ int main() {
     sigaction(SIGINT,  &sa, nullptr);
     sigaction(SIGTERM, &sa, nullptr);
 
-    // for trigger
     struct sigaction sa_usr{};
     sa_usr.sa_handler = triggerHandler;
     sigemptyset(&sa_usr.sa_mask);
@@ -44,5 +37,6 @@ int main() {
     Daemon daemon(shutdownRequested, triggerReceived);
     daemon.run();
 
+    curl_global_cleanup();
     return 0;
 }

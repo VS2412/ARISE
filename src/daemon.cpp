@@ -16,7 +16,7 @@ void Daemon::run() {
 
     Recorder    recorder("/tmp/ai-agent-recording.wav");
     Transcriber transcriber("/home/Aurelius/Documents/AdoVs/whisper.cpp/models/ggml-small.en.bin");
-    LLM         llm("qwen2.5-coder:14b");
+    LLM         llm("mistral");
     Executor    executor;
     TTS         tts("/home/Aurelius/.local/share/piper/en_US-lessac-medium.onnx");
 

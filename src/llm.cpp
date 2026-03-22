@@ -54,35 +54,52 @@ std::string LLM::post(const std::string& url, const std::string& body) {
 
 LLMResponse LLM::parse(const std::string& raw) {
     LLMResponse result;
-    if (raw.empty()) { result.speech = "I could not reach the language model."; return result; }
+    if (raw.empty()) {
+        result.speech = "I could not reach the language model.";
+        return result;
+    }
 
     try {
         auto outer = json::parse(raw);
 
-        // /api/chat returns message.content, not response
         std::string text;
         if (outer.contains("message") && outer["message"].contains("content"))
             text = outer["message"]["content"].get<std::string>();
         else if (outer.contains("response"))
             text = outer["response"].get<std::string>();
 
-        // trim whitespace
+        // trim
         auto s = text.find_first_not_of(" \t\n\r");
         auto e = text.find_last_not_of(" \t\n\r");
         if (s == std::string::npos) { result.speech = "No response."; return result; }
         text = text.substr(s, e - s + 1);
 
-        // try JSON action first
-        try {
-            auto inner = json::parse(text);
-            if (inner.contains("action") && inner.contains("param")) {
-                result.action.type  = inner["action"].get<std::string>();
-                result.action.param = inner["param"].get<std::string>();
-                Logger::info("LLM: action parsed → " + result.action.type + " : " + result.action.param);
-                return result;
-            }
-        } catch (...) {}
+        Logger::info("LLM: raw text → " + text.substr(0, 120));
 
+        // scan entire response for a JSON action object — handles mixed prose+JSON
+        size_t pos = 0;
+        while (pos < text.size()) {
+            size_t open = text.find('{', pos);
+            if (open == std::string::npos) break;
+            size_t close = text.find('}', open);
+            if (close == std::string::npos) break;
+
+            std::string candidate = text.substr(open, close - open + 1);
+            try {
+                auto inner = json::parse(candidate);
+                if (inner.contains("action") && inner.contains("param")) {
+                    result.action.type  = inner["action"].get<std::string>();
+                    result.action.param = inner["param"].get<std::string>();
+                    Logger::info("LLM: action → " + result.action.type +
+                                 " : " + result.action.param);
+                    return result; // action found, no speech needed
+                }
+            } catch (...) {}
+
+            pos = close + 1;
+        }
+
+        // no action found — treat as speech
         result.speech = text;
 
     } catch (const std::exception& ex) {

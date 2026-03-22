@@ -68,7 +68,8 @@ std::string Transcriber::transcribe(const std::string& wavPath) {
     wp.print_progress    = false;
     wp.print_timestamps  = false;
     wp.single_segment    = false;
-    wp.no_speech_thold   = 0.3f;  // default 0.6 is too aggressive for short clips
+    wp.no_speech_thold   = 0.3f;
+    wp.initial_prompt    = "open firefox, open terminal, open code, volume up, volume down, switch workspace, run command, type text"; // command vocabulary hint
 
     auto t0 = std::chrono::steady_clock::now();
     if (whisper_full(ctx, wp, samples.data(), (int)samples.size()) != 0) {

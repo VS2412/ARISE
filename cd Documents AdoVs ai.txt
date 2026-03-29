@@ -1,0 +1,77 @@
+❯ cd ~/Documents/AdoVs/ai-agent
+systemctl --user restart ai-agent
+journalctl --user -u ai-agent -f
+Mar 26 17:58:25 archlinux ai-agent[15589]: [INFO] [2026-03-26 17:58:25] TTS: speaking → Pausing.
+Mar 26 17:58:26 archlinux ai-agent[17652]: /tmp/aria_tts_out.wav
+Mar 26 17:58:26 archlinux ai-agent[15589]: [INFO] [2026-03-26 17:58:26] ARIA: paused.
+Mar 26 17:58:27 archlinux ai-agent[15589]: [INFO] [2026-03-26 17:58:27] VAD: speech detected.
+Mar 26 17:58:27 archlinux ai-agent[15589]: [INFO] [2026-03-26 17:58:27] VAD: speech end.
+Mar 26 18:00:42 archlinux systemd[3219]: Stopping AI Desktop Agent...
+Mar 26 18:00:42 archlinux ai-agent[15589]: [INFO] [2026-03-26 18:00:42] Daemon shutting down cleanly.
+Mar 26 18:00:42 archlinux systemd[3219]: Stopped AI Desktop Agent.
+Mar 26 18:00:42 archlinux systemd[3219]: ai-agent.service: Consumed 19.511s CPU time over 2min 46.206s wall clock time, 504M memory peak.
+Mar 26 18:00:42 archlinux systemd[3219]: Started AI Desktop Agent.
+Mar 26 18:00:42 archlinux ai-agent[19411]: [INFO] [2026-03-26 18:00:42] Logger initialized. Log file: /home/Aurelius/.ai-agent.log
+Mar 26 18:00:42 archlinux ai-agent[19411]: [INFO] [2026-03-26 18:00:42] ai-agent starting. PID: 19411
+Mar 26 18:00:42 archlinux ai-agent[19411]: [INFO] [2026-03-26 18:00:42] Initializing pipeline...
+Mar 26 18:00:42 archlinux ai-agent[19411]: whisper_init_from_file_with_params_no_state: loading model from '/home/Aurelius/Documents/AdoVs/whisper.cpp/models/ggml-small.en.bin'
+Mar 26 18:00:42 archlinux ai-agent[19411]: whisper_init_with_params_no_state: use gpu    = 1
+Mar 26 18:00:42 archlinux ai-agent[19411]: whisper_init_with_params_no_state: flash attn = 1
+Mar 26 18:00:42 archlinux ai-agent[19411]: whisper_init_with_params_no_state: gpu_device = 0
+Mar 26 18:00:42 archlinux ai-agent[19411]: whisper_init_with_params_no_state: dtw        = 0
+Mar 26 18:00:42 archlinux ai-agent[19411]: ggml_cuda_init: found 1 CUDA devices (Total VRAM: 5763 MiB):
+Mar 26 18:00:42 archlinux ai-agent[19411]:   Device 0: NVIDIA GeForce RTX 4050 Laptop GPU, compute capability 8.9, VMM: yes, VRAM: 5763 MiB
+Mar 26 18:00:42 archlinux ai-agent[19411]: whisper_init_with_params_no_state: devices    = 2
+Mar 26 18:00:42 archlinux ai-agent[19411]: whisper_init_with_params_no_state: backends   = 2
+Mar 26 18:00:42 archlinux ai-agent[19411]: whisper_model_load: loading model
+Mar 26 18:00:42 archlinux ai-agent[19411]: whisper_model_load: n_vocab       = 51864
+Mar 26 18:00:42 archlinux ai-agent[19411]: whisper_model_load: n_audio_ctx   = 1500
+Mar 26 18:00:42 archlinux ai-agent[19411]: whisper_model_load: n_audio_state = 768
+Mar 26 18:00:42 archlinux ai-agent[19411]: whisper_model_load: n_audio_head  = 12
+Mar 26 18:00:42 archlinux ai-agent[19411]: whisper_model_load: n_audio_layer = 12
+Mar 26 18:00:42 archlinux ai-agent[19411]: whisper_model_load: n_text_ctx    = 448
+Mar 26 18:00:42 archlinux ai-agent[19411]: whisper_model_load: n_text_state  = 768
+Mar 26 18:00:42 archlinux ai-agent[19411]: whisper_model_load: n_text_head   = 12
+Mar 26 18:00:42 archlinux ai-agent[19411]: whisper_model_load: n_text_layer  = 12
+Mar 26 18:00:42 archlinux ai-agent[19411]: whisper_model_load: n_mels        = 80
+Mar 26 18:00:42 archlinux ai-agent[19411]: whisper_model_load: ftype         = 1
+Mar 26 18:00:42 archlinux ai-agent[19411]: whisper_model_load: qntvr         = 0
+Mar 26 18:00:42 archlinux ai-agent[19411]: whisper_model_load: type          = 3 (small)
+Mar 26 18:00:42 archlinux ai-agent[19411]: whisper_model_load: adding 1607 extra tokens
+Mar 26 18:00:42 archlinux ai-agent[19411]: whisper_model_load: n_langs       = 99
+Mar 26 18:00:43 archlinux ai-agent[19411]: whisper_model_load:        CUDA0 total size =   487.00 MB
+Mar 26 18:00:43 archlinux ai-agent[19411]: whisper_model_load: model size    =  487.00 MB
+Mar 26 18:00:43 archlinux ai-agent[19411]: whisper_backend_init_gpu: device 0: CUDA0 (type: 1)
+Mar 26 18:00:43 archlinux ai-agent[19411]: whisper_backend_init_gpu: found GPU device 0: CUDA0 (type: 1, cnt: 0)
+Mar 26 18:00:43 archlinux ai-agent[19411]: whisper_backend_init_gpu: using CUDA0 backend
+Mar 26 18:00:43 archlinux ai-agent[19411]: whisper_init_state: kv self size  =   18.87 MB
+Mar 26 18:00:43 archlinux ai-agent[19411]: whisper_init_state: kv cross size =   56.62 MB
+Mar 26 18:00:43 archlinux ai-agent[19411]: whisper_init_state: kv pad  size  =    4.72 MB
+Mar 26 18:00:43 archlinux ai-agent[19411]: whisper_init_state: compute buffer (conv)   =   23.38 MB
+Mar 26 18:00:43 archlinux ai-agent[19411]: whisper_init_state: compute buffer (encode) =   33.85 MB
+Mar 26 18:00:43 archlinux ai-agent[19411]: whisper_init_state: compute buffer (cross)  =    6.20 MB
+Mar 26 18:00:43 archlinux ai-agent[19411]: whisper_init_state: compute buffer (decode) =   98.20 MB
+Mar 26 18:00:43 archlinux ai-agent[19411]: [INFO] [2026-03-26 18:00:43] Whisper model loaded: /home/Aurelius/Documents/AdoVs/whisper.cpp/models/ggml-small.en.bin
+Mar 26 18:00:43 archlinux ai-agent[19411]: [INFO] [2026-03-26 18:00:43] TTS: ready.
+Mar 26 18:00:43 archlinux ai-agent[19411]: [INFO] [2026-03-26 18:00:43] Memory: loaded from /home/Aurelius/.aria_memory.db
+Mar 26 18:00:43 archlinux ai-agent[19411]: [INFO] [2026-03-26 18:00:43] Recorder: WebRTC VAD started.
+Mar 26 18:00:43 archlinux ai-agent[19411]: [INFO] [2026-03-26 18:00:43] TTS: speaking → Online.
+Mar 26 18:00:44 archlinux ai-agent[19426]: /tmp/aria_tts_out.wav
+Mar 26 18:00:45 archlinux ai-agent[19411]: [INFO] [2026-03-26 18:00:45] ARIA ready.
+Mar 26 18:00:47 archlinux ai-agent[19411]: [INFO] [2026-03-26 18:00:47] VAD: speech detected.
+Mar 26 18:00:47 archlinux ai-agent[19411]: [INFO] [2026-03-26 18:00:47] VAD: speech end.
+Mar 26 18:00:47 archlinux ai-agent[19411]: [INFO] [2026-03-26 18:00:47] Transcribing file: /tmp/aria_speech.wav (14400 samples)
+Mar 26 18:00:47 archlinux ai-agent[19411]: [INFO] [2026-03-26 18:00:47] Transcribe finished in 283 ms
+Mar 26 18:00:47 archlinux ai-agent[19411]: [INFO] [2026-03-26 18:00:47] VAD: blank, skipping.
+Mar 26 18:00:49 archlinux ai-agent[19411]: [INFO] [2026-03-26 18:00:49] VAD: speech detected.
+Mar 26 18:00:49 archlinux ai-agent[19411]: [INFO] [2026-03-26 18:00:49] VAD: speech end.
+Mar 26 18:00:49 archlinux ai-agent[19411]: [INFO] [2026-03-26 18:00:49] Transcribing file: /tmp/aria_speech.wav (29440 samples)
+Mar 26 18:00:49 archlinux ai-agent[19411]: [INFO] [2026-03-26 18:00:49] Transcribe finished in 74 ms
+Mar 26 18:00:49 archlinux ai-agent[19411]: [INFO] [2026-03-26 18:00:49] You said: open firefox.
+Mar 26 18:00:49 archlinux ai-agent[19411]: [INFO] [2026-03-26 18:00:49] LLM: prompt → open firefox.
+Mar 26 18:00:57 archlinux ai-agent[19411]: [INFO] [2026-03-26 18:00:57] VAD: speech detected.
+Mar 26 18:00:59 archlinux ai-agent[19411]: [INFO] [2026-03-26 18:00:59] VAD: speech end.
+Mar 26 18:01:00 archlinux ai-agent[19411]: [INFO] [2026-03-26 18:01:00] LLM: done in 10698 ms
+Mar 26 18:01:00 archlinux ai-agent[19411]: [INFO] [2026-03-26 18:01:00] LLM: raw → However, I'm a large language model, I don't have the capability to directly interact with your comp
+Mar 26 18:01:00 archlinux ai-agent[19411]: [INFO] [2026-03-26 18:01:00] TTS: speaking → However, I'm a large language model, I don't have the capability to directly int
+Mar 26 18:01:02 archlinux ai-agent[21679]: /tmp/aria_tts_out.wav

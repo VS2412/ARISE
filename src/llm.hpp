@@ -1,8 +1,9 @@
 #pragma once
 #include <string>
+#include <deque>
 
 struct AgentAction {
-    std::string type;   // open | run | type | workspace | volume | ""
+    std::string type;
     std::string param;
 };
 
@@ -12,13 +13,28 @@ struct LLMResponse {
     bool hasAction() const { return !action.type.empty(); }
 };
 
+struct LLMContext {
+    std::string activeApp;
+    std::string activeWindow;
+    std::string clipboard;
+    std::string memorySummary;
+};
+
 class LLM {
 public:
-    explicit LLM(const std::string& model = "mistral");
-    LLMResponse think(const std::string& userText);
+    explicit LLM(const std::string& model = "llama3.1");
+    LLMResponse think(const std::string& userText,
+                      const LLMContext&  ctx = {});
+    void clearHistory();
+
 private:
     std::string model_;
-    static size_t writeCallback(void* ptr, size_t size, size_t nmemb, std::string* out);
-    std::string post(const std::string& url, const std::string& body);
-    LLMResponse parse(const std::string& ollamaRaw);
+    struct Message { std::string role, content; };
+    std::deque<Message> history_;
+    static constexpr int MAX_HISTORY = 8;
+
+    static size_t writeCallback(void*, size_t, size_t, std::string*);
+    std::string   post(const std::string& url, const std::string& body);
+    LLMResponse   parse(const std::string& raw);
+    std::string   buildSystem(const LLMContext& ctx);
 };

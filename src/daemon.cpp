@@ -60,7 +60,7 @@ void Daemon::run() {
     std::string dbPath = home ? std::string(home) + "/.aria_memory.db" : "/tmp/aria_memory.db";
 
     Transcriber transcriber("/home/Aurelius/Documents/AdoVs/whisper.cpp/models/ggml-small.en.bin");
-    LLM         llm("aria-agent");
+    LLM         llm("llama3.1");
     Executor    executor;
     TTS         tts("/home/Aurelius/.local/share/piper/en_US-lessac-medium.onnx");
     Memory      memory(dbPath);
@@ -124,6 +124,7 @@ void Daemon::run() {
         } else {
             // unknown — send to LLM for reasoning
             auto sysCtx = Context::capture();
+            Logger::info("Context: app=" + sysCtx.activeApp + " window=" + sysCtx.activeWindow);
             LLMContext ctx;
             ctx.activeApp     = sysCtx.activeApp;
             ctx.activeWindow  = sysCtx.activeWindow;

@@ -41,6 +41,27 @@ AgentAction classifyIntent(const std::string& raw) {
         {"obs",        "obs"},
         {"gimp",       "gimp"},
     };
+    // --- OPEN WEBSITE (intercept before app lookup) ---
+    static const std::vector<std::pair<std::string,std::string>> sites = {
+        {"youtube",    "https://youtube.com"},
+        {"reddit",     "https://reddit.com"},
+        {"github",     "https://github.com"},
+        {"twitter",    "https://twitter.com"},
+        {"instagram",  "https://instagram.com"},
+        {"netflix",    "https://netflix.com"},
+        {"gmail",      "https://mail.google.com"},
+        {"google",     "https://google.com"},
+        {"linkedin",   "https://linkedin.com"},
+        {"wikipedia",  "https://wikipedia.org"},
+        {"whatsapp",   "https://web.whatsapp.com"},
+    };
+    if (t.rfind("open ", 0) == 0) {
+        std::string what = t.substr(5);
+        for (auto& [k, v] : sites)
+            if (what.find(k) != std::string::npos)
+                return {"url", v};
+    }
+    // (existing open app block follows unchanged)
     if (t.rfind("open ", 0) == 0) {
         std::string app = t.substr(5);
         for (auto& [k, v] : apps)

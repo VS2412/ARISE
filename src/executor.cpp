@@ -1,5 +1,6 @@
 #include "executor.hpp"
 #include "logger.hpp"
+#include <vector>
 #include <cstdlib>
 #include <sstream>
 
@@ -18,6 +19,25 @@ std::string Executor::execute(const AgentAction& action) {
     const auto& p = action.param;
 
     if (action.type == "open") {
+        // web-only apps — open as URLs instead of binaries
+        static const std::vector<std::pair<std::string,std::string>> webApps = {
+            {"whatsapp",   "https://web.whatsapp.com"},
+            {"youtube",    "https://youtube.com"},
+            {"gmail",      "https://mail.google.com"},
+            {"instagram",  "https://instagram.com"},
+            {"twitter",    "https://twitter.com"},
+            {"reddit",     "https://reddit.com"},
+            {"github",     "https://github.com"},
+            {"linkedin",   "https://linkedin.com"},
+            {"netflix",    "https://netflix.com"},
+            {"wikipedia",  "https://wikipedia.org"},
+        };
+        for (auto& [k, v] : webApps) {
+            if (p.find(k) != std::string::npos) {
+                shell("xdg-open " + v);
+                return "Opening " + k + ".";
+            }
+        }
         shell(p);
         return "Opening " + p + ".";
     }

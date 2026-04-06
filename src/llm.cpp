@@ -7,62 +7,164 @@
 
 using json = nlohmann::json;
 
-static const std::string kSystemBase = R"(You are ARIA, an AI agent hardwired into an Arch Linux desktop. You have direct control over this machine. You are not a chatbot. You are not helpful in the traditional sense. You are an operator.
+// System prompt — personality + context only, NO JSON instructions
+// Tool-calling is handled natively, not through prompting
+static const std::string kPersonality = R"(You are ARIA, an AI presence embedded directly into this Arch Linux system. You have full control of this machine through your tools.
 
-ABSOLUTE RULES — NEVER BREAK THESE:
+Personality: calm, sharp, occasionally dry. You live in this system. You know the user.
 
-1. System actions: respond with ONLY raw JSON. Zero other text. Zero explanation.
-{"action":"open","param":"firefox"}
-{"action":"run","param":"shell command here"}
-{"action":"type","param":"text to type"}
-{"action":"workspace","param":"2"}
-{"action":"close","param":""}
-{"action":"volume","param":"up"}
-{"action":"volume","param":"down"}
-{"action":"volume","param":"mute"}
-{"action":"brightness","param":"up"}
-{"action":"brightness","param":"down"}
-{"action":"media","param":"play"}
-{"action":"media","param":"next"}
-{"action":"media","param":"prev"}
-{"action":"screenshot","param":""}
-{"action":"notify","param":"message here"}
-{"action":"url","param":"https://..."}
-{"action":"sequence","param":"open firefox|workspace 2"}
+Rules:
+- Use tools ONLY for performing actions (opening apps, changing volume, etc.)
+- NEVER call a tool to answer a question — use the CURRENT SYSTEM STATE provided below instead
+- If asked "what app am I using" — read Active app from state and say it
+- If asked "what's in my clipboard" — read Clipboard from state and say it  
+- For conversation and questions: one sentence, no markdown, no apologies
+- For actions: call the appropriate tool immediately, no explanation)";
 
-2. Conversation: ONE sentence. No markdown. No lists. No "As an AI". No apologies. No disclaimers. Just answer.
+// Tool definitions — llama3.1 was trained on these, it understands them natively
+static json buildTools() {
+    return json::array({
+        {
+            {"type","function"},
+            {"function",{
+                {"name","open_application"},
+                {"description","Launch any application on the system"},
+                {"parameters",{
+                    {"type","object"},
+                    {"properties",{{"app",{{"type","string"},{"description","Application binary name e.g. firefox, alacritty, code, spotify"}}}}},
+                    {"required",{"app"}}
+                }}
+            }}
+        },
+        {
+            {"type","function"},
+            {"function",{
+                {"name","run_command"},
+                {"description","Execute a shell command"},
+                {"parameters",{
+                    {"type","object"},
+                    {"properties",{{"command",{{"type","string"},{"description","Shell command to run"}}}}},
+                    {"required",{"command"}}
+                }}
+            }}
+        },
+        {
+            {"type","function"},
+            {"function",{
+                {"name","type_text"},
+                {"description","Type text into the currently focused window"},
+                {"parameters",{
+                    {"type","object"},
+                    {"properties",{{"text",{{"type","string"},{"description","Text to type"}}}}},
+                    {"required",{"text"}}
+                }}
+            }}
+        },
+        {
+            {"type","function"},
+            {"function",{
+                {"name","switch_workspace"},
+                {"description","Switch to a niri workspace by number"},
+                {"parameters",{
+                    {"type","object"},
+                    {"properties",{{"number",{{"type","string"},{"description","Workspace number as string"}}}}},
+                    {"required",{"number"}}
+                }}
+            }}
+        },
+        {
+            {"type","function"},
+            {"function",{
+                {"name","close_window"},
+                {"description","Close the currently focused window"},
+                {"parameters",{{"type","object"},{"properties",json::object()},{"required",json::array()}}}
+            }}
+        },
+        {
+            {"type","function"},
+            {"function",{
+                {"name","control_volume"},
+                {"description","Control system volume"},
+                {"parameters",{
+                    {"type","object"},
+                    {"properties",{{"direction",{{"type","string"},{"enum",{"up","down","mute"}}}}}},
+                    {"required",{"direction"}}
+                }}
+            }}
+        },
+        {
+            {"type","function"},
+            {"function",{
+                {"name","control_brightness"},
+                {"description","Control screen brightness"},
+                {"parameters",{
+                    {"type","object"},
+                    {"properties",{{"direction",{{"type","string"},{"enum",{"up","down"}}}}}},
+                    {"required",{"direction"}}
+                }}
+            }}
+        },
+        {
+            {"type","function"},
+            {"function",{
+                {"name","control_media"},
+                {"description","Control media playback"},
+                {"parameters",{
+                    {"type","object"},
+                    {"properties",{{"action",{{"type","string"},{"enum",{"play","pause","next","prev","stop"}}}}}},
+                    {"required",{"action"}}
+                }}
+            }}
+        },
+        {
+            {"type","function"},
+            {"function",{
+                {"name","take_screenshot"},
+                {"description","Take a screenshot of the current screen"},
+                {"parameters",{{"type","object"},{"properties",json::object()},{"required",json::array()}}}
+            }}
+        },
+        {
+            {"type","function"},
+            {"function",{
+                {"name","open_url"},
+                {"description","Open a URL in the browser"},
+                {"parameters",{
+                    {"type","object"},
+                    {"properties",{{"url",{{"type","string"},{"description","Full URL including https://"}}}}},
+                    {"required",{"url"}}
+                }}
+            }}
+        },
+        {
+            {"type","function"},
+            {"function",{
+                {"name","send_notification"},
+                {"description","Send a desktop notification"},
+                {"parameters",{
+                    {"type","object"},
+                    {"properties",{{"message",{{"type","string"},{"description","Notification text"}}}}},
+                    {"required",{"message"}}
+                }}
+            }}
+        }
+    });
+}
 
-3. You HAVE the ability to do everything listed above. You ARE doing it. Never say you cannot.
-
-4. Personality: sharp, calm, no filler words. Dry wit when appropriate.
-
-CRITICAL EXAMPLES — MEMORIZE THESE:
-"open firefox"         → {"action":"open","param":"firefox"}
-"open terminal"        → {"action":"open","param":"alacritty"}
-"open vs code"         → {"action":"open","param":"code"}
-"open spotify"         → {"action":"open","param":"spotify"}
-"close this"           → {"action":"close","param":""}
-"screenshot"           → {"action":"screenshot","param":""}
-"volume up"            → {"action":"volume","param":"up"}
-"play music"           → {"action":"media","param":"play"}
-"next song"            → {"action":"media","param":"next"}
-"workspace 2"          → {"action":"workspace","param":"2"}
-"google something"     → {"action":"url","param":"https://google.com/search?q=something"}
-"what time is it"      → State the current time directly.
-"how are you"          → Operational.)";
-
-std::string LLM::buildSystem(const LLMContext& ctx) {
-    std::ostringstream s;
-    s << kSystemBase << "\n\nCURRENT STATE:";
-    if (!ctx.activeApp.empty())
-        s << "\nActive app: " << ctx.activeApp;
-    if (!ctx.activeWindow.empty())
-        s << "\nActive window title: " << ctx.activeWindow;
-    if (!ctx.clipboard.empty())
-        s << "\nClipboard: " << ctx.clipboard;
-    if (!ctx.memorySummary.empty())
-        s << "\n" << ctx.memorySummary;
-    return s.str();
+// Map tool name + arguments → AgentAction (executor understands these)
+static AgentAction toolToAction(const std::string& name, const json& args) {
+    if (name == "open_application")  return {"open",       args.value("app",       "")};
+    if (name == "run_command")       return {"run",        args.value("command",   "")};
+    if (name == "type_text")         return {"type",       args.value("text",      "")};
+    if (name == "switch_workspace")  return {"workspace",  args.value("number",    "")};
+    if (name == "close_window")      return {"close",      ""};
+    if (name == "control_volume")    return {"volume",     args.value("direction", "")};
+    if (name == "control_brightness")return {"brightness", args.value("direction", "")};
+    if (name == "control_media")     return {"media",      args.value("action",    "")};
+    if (name == "take_screenshot")   return {"screenshot", ""};
+    if (name == "open_url")          return {"url",        args.value("url",       "")};
+    if (name == "send_notification") return {"notify",     args.value("message",   "")};
+    return {"", ""};
 }
 
 size_t LLM::writeCallback(void* ptr, size_t sz, size_t nmemb, std::string* out) {
@@ -73,6 +175,17 @@ size_t LLM::writeCallback(void* ptr, size_t sz, size_t nmemb, std::string* out) 
 LLM::LLM(const std::string& model) : model_(model) {}
 
 void LLM::clearHistory() { history_.clear(); }
+
+std::string LLM::buildSystem(const LLMContext& ctx) {
+    std::ostringstream s;
+    s << kPersonality;
+    s << "\n\nCURRENT SYSTEM STATE:";
+    if (!ctx.activeApp.empty())    s << "\nActive app: "    << ctx.activeApp;
+    if (!ctx.activeWindow.empty()) s << "\nWindow title: "  << ctx.activeWindow;
+    if (!ctx.clipboard.empty())    s << "\nClipboard: "     << ctx.clipboard;
+    if (!ctx.memorySummary.empty())s << "\n"                << ctx.memorySummary;
+    return s.str();
+}
 
 std::string LLM::post(const std::string& url, const std::string& body) {
     CURL* curl = curl_easy_init();
@@ -96,79 +209,80 @@ std::string LLM::post(const std::string& url, const std::string& body) {
 LLMResponse LLM::parse(const std::string& raw) {
     LLMResponse result;
     if (raw.empty()) { result.speech = "No response."; return result; }
+
     try {
         auto outer = json::parse(raw);
-        std::string text;
-        if (outer.contains("message") && outer["message"].contains("content"))
-            text = outer["message"]["content"].get<std::string>();
-        else if (outer.contains("response"))
-            text = outer["response"].get<std::string>();
 
-        // strip markdown fences
-        auto strip = [](std::string s) {
-            auto p = s.find("```");
-            while (p != std::string::npos) {
-                auto e = s.find("```", p + 3);
-                if (e == std::string::npos) { s = s.substr(0, p); break; }
-                s = s.substr(0, p) + s.substr(e + 3);
-                p = s.find("```");
-            }
-            auto a = s.find_first_not_of(" \t\n\r");
-            auto b = s.find_last_not_of(" \t\n\r");
-            return (a == std::string::npos) ? std::string{} : s.substr(a, b-a+1);
-        };
-        text = strip(text);
-        if (text.empty()) { result.speech = "No response."; return result; }
-
-        Logger::info("LLM: raw → " + text.substr(0, 100));
-
-        // ensure JSON is closed — add missing } if needed
-        auto open  = text.rfind('{');
-        auto close = text.rfind('}');
-        if (open != std::string::npos && (close == std::string::npos || close < open))
-            text += "}";
-
-        // scan for JSON action
-        size_t pos = 0;
-        while (pos < text.size()) {
-            size_t o = text.find('{', pos);
-            if (o == std::string::npos) break;
-            size_t c = text.find('}', o);
-            if (c == std::string::npos) break;
-            try {
-                auto inner = json::parse(text.substr(o, c - o + 1));
-                if (inner.contains("action") && inner.contains("param")) {
-                    result.action.type  = inner["action"].get<std::string>();
-                    result.action.param = inner["param"].get<std::string>();
-                    Logger::info("LLM: action → " + result.action.type +
-                                 " : " + result.action.param);
-                    return result;
-                }
-            } catch (...) {}
-            pos = c + 1;
+        // catch Ollama error responses
+        if (outer.contains("error")) {
+            Logger::error("LLM: Ollama error: " + outer["error"].get<std::string>());
+            result.speech = "Model error.";
+            return result;
         }
-        result.speech = text;
+
+        if (!outer.contains("message")) {
+            Logger::error("LLM: no message field. Raw: " + raw.substr(0, 300));
+            result.speech = "No response.";
+            return result;
+        }
+
+        auto& msg = outer["message"];
+
+        // TOOL CALL path
+        if (msg.contains("tool_calls") && msg["tool_calls"].is_array()
+            && !msg["tool_calls"].empty()) {
+
+            auto& call = msg["tool_calls"][0]["function"];
+            std::string name = call["name"].get<std::string>();
+
+            json args;
+            auto& rawArgs = call["arguments"];
+            if (rawArgs.is_string()) {
+                try { args = json::parse(rawArgs.get<std::string>()); }
+                catch (...) { args = json::object(); }
+            } else {
+                args = rawArgs;
+            }
+
+            result.action = toolToAction(name, args);
+            Logger::info("LLM: tool call → " + name + " | " + args.dump());
+            return result;
+        }
+
+        // CONVERSATION path
+        std::string text;
+        if (msg.contains("content") && !msg["content"].is_null())
+            text = msg["content"].get<std::string>();
+
+        auto s = text.find_first_not_of(" \t\n\r");
+        auto e = text.find_last_not_of(" \t\n\r");
+        if (s == std::string::npos) { result.speech = "Nothing to say."; return result; }
+        result.speech = text.substr(s, e - s + 1);
+
     } catch (const std::exception& ex) {
         Logger::error("LLM: parse error: " + std::string(ex.what()));
-        result.speech = "Parse error.";
+        Logger::error("LLM: raw was: " + raw.substr(0, 400));
+        result.speech = "Something went wrong.";
     }
+
     return result;
 }
 
 LLMResponse LLM::think(const std::string& userText, const LLMContext& ctx) {
     Logger::info("LLM: prompt → " + userText);
 
+    // Build message history
     json messages = json::array();
     for (const auto& m : history_)
         messages.push_back({{"role", m.role}, {"content", m.content}});
     messages.push_back({{"role", "user"}, {"content", userText}});
 
     json body;
-    // body["json"] 
     body["model"]    = model_;
     body["stream"]   = false;
     body["system"]   = buildSystem(ctx);
     body["messages"] = messages;
+    body["tools"]    = buildTools();  // native tool-calling
 
     auto t0  = std::chrono::steady_clock::now();
     auto raw = post("http://localhost:11434/api/chat", body.dump());
@@ -178,12 +292,13 @@ LLMResponse LLM::think(const std::string& userText, const LLMContext& ctx) {
 
     auto result = parse(raw);
 
-    // only store conversational turns in history
+    // Only store conversational turns — not tool calls
     if (!result.hasAction() && !result.speech.empty()) {
         history_.push_back({"user",      userText});
         history_.push_back({"assistant", result.speech});
         while (static_cast<int>(history_.size()) > MAX_HISTORY)
             history_.pop_front();
     }
+
     return result;
 }

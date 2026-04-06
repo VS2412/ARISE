@@ -2,6 +2,7 @@
 #include <cstdio>
 #include <memory>
 #include <string>
+#include "logger.hpp"
 #include <nlohmann/json.hpp>
 
 using json = nlohmann::json;
@@ -30,7 +31,9 @@ SystemContext Context::capture() {
             ctx.activeApp    = j.value("app_id", "");
             ctx.activeWindow = j.value("title",  "");
         }
-    } catch (...) {}
+    }
+    catch (...) {}
+    Logger::info("Context: app=" + ctx.activeApp + " window=" + ctx.activeWindow);
 
     // clipboard — truncate to 120 chars to save tokens
     ctx.clipboard = exec("wl-paste --no-newline 2>/dev/null | head -c 120");

@@ -23,8 +23,7 @@ struct LLMContext {
 class LLM {
 public:
     explicit LLM(const std::string& model = "llama3.1");
-    LLMResponse think(const std::string& userText,
-                      const LLMContext&  ctx = {});
+    LLMResponse think(const std::string& userText, const LLMContext& ctx = {});
     void clearHistory();
 
 private:

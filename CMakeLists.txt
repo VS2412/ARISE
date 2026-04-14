@@ -19,11 +19,13 @@ add_executable(ai-agent
     src/recorder.cpp
     src/transcriber.cpp
     src/llm.cpp
-    src/intent.cpp
     src/executor.cpp
     src/tts.cpp
     src/context.cpp
     src/memory.cpp
+    src/intent.cpp
+    src/screen.cpp
+    src/timer.cpp
 )
 
 target_include_directories(ai-agent PRIVATE

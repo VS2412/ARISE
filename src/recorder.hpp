@@ -32,8 +32,8 @@ private:
     static constexpr int RATE         = 16000;
     static constexpr int FRAME_MS     = 20;
     static constexpr int FRAME_SAMPLES = RATE * FRAME_MS / 1000; // 320
-    static constexpr int ONSET_FRAMES  = 15;   // 80ms of voice to start
-    static constexpr int TRAIL_FRAMES  = 40;  // 800ms of silence to stop
+    static constexpr int ONSET_FRAMES  = 10;   // 200ms of voice to start
+    static constexpr int TRAIL_FRAMES  = 25;  // 500ms of silence to stop
     static constexpr int MIN_FRAMES    = 10;  // 200ms minimum utterance
     static constexpr int MAX_FRAMES    = 1000; // 20s hard cap
     static constexpr int PREROLL       = 5;   // frames before onset

@@ -1,16 +1,16 @@
 #include "context.hpp"
+#include "screen.hpp"
+#include "logger.hpp"
 #include <cstdio>
 #include <memory>
 #include <string>
-#include "logger.hpp"
 #include <nlohmann/json.hpp>
 
 using json = nlohmann::json;
 
 static std::string exec(const char* cmd) {
     std::string result;
-    std::unique_ptr<FILE, int (*)(FILE*)> pipe(popen(cmd, "r"), pclose);
-    // std::unique_ptr<FILE, decltype(&pclose)> pipe(popen(cmd, "r"), pclose);
+    std::unique_ptr<FILE, decltype(&pclose)> pipe(popen(cmd, "r"), pclose);
     if (!pipe) return "";
     char buf[256];
     while (fgets(buf, sizeof(buf), pipe.get()))
@@ -23,7 +23,6 @@ static std::string exec(const char* cmd) {
 SystemContext Context::capture() {
     SystemContext ctx;
 
-    // active window via niri IPC
     try {
         std::string raw = exec("niri msg --json focused-window 2>/dev/null");
         if (!raw.empty()) {
@@ -31,12 +30,9 @@ SystemContext Context::capture() {
             ctx.activeApp    = j.value("app_id", "");
             ctx.activeWindow = j.value("title",  "");
         }
-    }
-    catch (...) {}
-    Logger::info("Context: app=" + ctx.activeApp + " window=" + ctx.activeWindow);
+    } catch (...) {}
 
-    // clipboard — truncate to 120 chars to save tokens
-    ctx.clipboard = exec("wl-paste --no-newline 2>/dev/null | head -c 120");
-
+    ctx.clipboard   = exec("wl-paste --no-newline 2>/dev/null | head -c 120");
+    ctx.screenText  = Screen::capture();
     return ctx;
 }

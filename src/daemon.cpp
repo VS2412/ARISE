@@ -8,6 +8,7 @@
 #include "tts.hpp"
 #include "context.hpp"
 #include "memory.hpp"
+#include "timer.hpp"
 #include <thread>
 #include <chrono>
 #include <mutex>
@@ -17,6 +18,8 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
+#include <map>
+#include <sstream>
 
 Daemon::Daemon(std::atomic<bool>& flag, std::atomic<bool>& pause)
     : shutdownRequested(flag), pauseToggle(pause) {}
@@ -35,22 +38,73 @@ static bool isInterruptCommand(const std::string& text) {
            t.find("enough")   != std::string::npos;
 }
 
-// extract name if user says "my name is X" or "I am X"
-static std::string extractName(const std::string& text) {
+// count real words (skip punctuation-only tokens)
+static int wordCount(const std::string& text) {
+    int count = 0;
+    bool inWord = false;
+    for (char c : text) {
+        if (std::isalpha(static_cast<unsigned char>(c))) {
+            if (!inWord) { ++count; inWord = true; }
+        } else {
+            inWord = false;
+        }
+    }
+    return count;
+}
+
+// Passive fact extraction: scan user speech for self-identifying phrases.
+// Returns a map of fact_key → value. Only emits keys when a clean match is found.
+static std::map<std::string, std::string> extractFacts(const std::string& text) {
     auto t = lower(text);
+    std::map<std::string, std::string> facts;
+
     auto tryExtract = [&](const std::string& prefix) -> std::string {
         auto pos = t.find(prefix);
         if (pos == std::string::npos) return "";
         std::string rest = text.substr(pos + prefix.size());
-        auto end = rest.find_first_of(".,!?");
+        auto end = rest.find_first_of(".,!?;\n");
         if (end != std::string::npos) rest = rest.substr(0, end);
-        while (!rest.empty() && rest[0] == ' ') rest = rest.substr(1);
+        while (!rest.empty() && (rest.front() == ' ' || rest.front() == '\t')) rest.erase(rest.begin());
+        while (!rest.empty() && (rest.back() == ' ' || rest.back() == '\t')) rest.pop_back();
         return rest;
     };
-    auto name = tryExtract("my name is ");
-    if (name.empty()) name = tryExtract("i am ");
-    if (name.empty()) name = tryExtract("call me ");
-    return name;
+
+    auto firstMatch = [&](std::initializer_list<const char*> prefixes) -> std::string {
+        for (auto p : prefixes) {
+            auto v = tryExtract(p);
+            if (!v.empty()) return v;
+        }
+        return "";
+    };
+
+    // Name (order matters — "my name is" is cleanest)
+    auto name = firstMatch({"my name is ", "call me ", "i'm called ", "i am called "});
+    if (!name.empty() && name.size() < 40) facts["user_name"] = name;
+
+    // Location
+    auto loc = firstMatch({"i live in ", "i am from ", "i'm from ", "i'm in ", "i am in "});
+    if (!loc.empty() && loc.size() < 50) facts["location"] = loc;
+
+    // Job / role
+    auto job = firstMatch({"i work as ", "i work at ", "my job is "});
+    if (!job.empty() && job.size() < 80) facts["job"] = job;
+
+    // Preference
+    auto pref = firstMatch({"i prefer ", "i like using ", "i swear by "});
+    if (!pref.empty() && pref.size() < 80) facts["preference"] = pref;
+
+    // Current project
+    auto proj = firstMatch({"i'm working on ", "i am working on ", "my project is ", "i'm building "});
+    if (!proj.empty() && proj.size() < 120) facts["current_project"] = proj;
+
+    return facts;
+}
+
+// Helper: get a string from JSON args
+static std::string arg(const nlohmann::json& a, const std::string& key) {
+    if (a.contains(key) && a[key].is_string()) return a[key].get<std::string>();
+    if (a.contains("param") && a["param"].is_string()) return a["param"].get<std::string>();
+    return "";
 }
 
 void Daemon::run() {
@@ -60,7 +114,8 @@ void Daemon::run() {
     std::string dbPath = home ? std::string(home) + "/.aria_memory.db" : "/tmp/aria_memory.db";
 
     Transcriber transcriber("/home/Aurelius/Documents/AdoVs/whisper.cpp/models/ggml-small.en.bin");
-    LLM         llm("llama3.1");
+    const char* modelEnv = std::getenv("ARIA_MODEL");
+    LLM         llm(modelEnv ? modelEnv : "qwen3:8b");
     Executor    executor;
     TTS         tts("/home/Aurelius/.local/share/piper/en_US-lessac-medium.onnx");
     Memory      memory(dbPath);
@@ -76,6 +131,74 @@ void Daemon::run() {
             speechQueue.push(wavPath);
             qCV.notify_one();
         });
+
+    TimerManager timers([&tts, &recorder](const std::string& label) {
+        recorder.mute();
+        tts.speak("Timer done: " + label);
+        system(("notify-send 'ARIA Timer' " + std::string("'") + label + "'").c_str());
+        recorder.unmute();
+    });
+
+    // Handle timer actions that the executor delegates back to us
+    auto handleTimerAction = [&](const AgentAction& act) -> std::string {
+        if (act.type == "timer_set") {
+            int secs = 0;
+            if (act.args.contains("duration_seconds") && act.args["duration_seconds"].is_number())
+                secs = act.args["duration_seconds"].get<int>();
+            std::string label = arg(act.args, "label");
+            if (secs <= 0) return "Invalid duration.";
+            int id = timers.addTimer(secs, label);
+            return "Timer #" + std::to_string(id) + " set for " + std::to_string(secs) + " seconds.";
+        }
+        if (act.type == "timer_list") {
+            return timers.list();
+        }
+        if (act.type == "timer_cancel") {
+            int id = 0;
+            if (act.args.contains("id") && act.args["id"].is_number())
+                id = act.args["id"].get<int>();
+            return timers.cancel(id) ? "Timer cancelled." : "Timer not found.";
+        }
+        return "";
+    };
+
+    // Execute an action, routing timers and memory recall to internal handlers
+    auto executeAction = [&](const AgentAction& act) -> std::string {
+        if (act.type == "timer_set" || act.type == "timer_list" || act.type == "timer_cancel")
+            return handleTimerAction(act);
+        if (act.type == "recall_memory") {
+            std::string query = arg(act.args, "query");
+            if (query.empty()) return "No query specified.";
+            auto results = memory.search(query, 5);
+            if (results.empty()) return "Nothing found in memory about that.";
+            std::ostringstream out;
+            for (auto& r : results)
+                out << "[" << r.timestamp << "] " << r.role << ": " << r.content << "\n";
+            return out.str();
+        }
+        return executor.execute(act);
+    };
+
+    // Background summarizer: every 20 turns, compress old conversation into a summary.
+    // Runs detached so it doesn't block the user.
+    auto maybeSummarize = [&]() {
+        int lastId   = memory.lastConversationId();
+        int lastSumm = memory.lastSummarizedId();
+        if (lastId - lastSumm < 20) return;
+        std::thread([&memory, &llm, lastSumm, lastId]() {
+            auto turns = memory.getRange(lastSumm, lastId);
+            if (turns.size() < 10) return;
+            std::ostringstream text;
+            for (auto& t : turns)
+                text << t.role << ": " << t.content << "\n";
+            auto summary = llm.summarize(text.str());
+            if (!summary.empty()) {
+                memory.saveSummary(summary, lastSumm, lastId);
+                Logger::info("Memory: summarized turns " +
+                             std::to_string(lastSumm + 1) + "-" + std::to_string(lastId));
+            }
+        }).detach();
+    };
 
     std::thread processor([&]() {
     while (!shutdownRequested.load()) {
@@ -102,33 +225,68 @@ void Daemon::run() {
             continue;
         }
 
-        // learn name passively
-        auto name = extractName(text);
-        if (!name.empty()) {
-            memory.setFact("user_name", name);
-            Logger::info("Memory: learned name = " + name);
+        // Passive fact extraction — learn name, location, job, preferences, projects
+        auto newFacts = extractFacts(text);
+        for (auto& [k, v] : newFacts) {
+            memory.setFact(k, v);
+            Logger::info("Memory: learned " + k + " = " + v);
         }
 
-        // INTENT CLASSIFIER FIRST — no LLM needed for known commands
+        // INTENT CLASSIFIER FIRST — runs before word count filter
+        // so "open firefox" (2 words) still works
         AgentAction directAction = classifyIntent(text);
+
+        // skip noise ONLY if intent didn't match — short known commands are fine
+        if (directAction.empty() && wordCount(text) <= 2) {
+            Logger::info("Skipped short utterance: " + text);
+            continue;
+        }
 
         recorder.mute();
 
-        if (!directAction.type.empty()) {
+        if (!directAction.empty()) {
             // known command — execute instantly
-            Logger::info("Intent: " + directAction.type + " → " + directAction.param);
-            std::string feedback = executor.execute(directAction);
+            Logger::info("Intent: " + directAction.type + " → " + directAction.args.dump());
+            std::string feedback = executeAction(directAction);
             memory.save("user", text);
-            memory.save("assistant", directAction.type + ":" + directAction.param);
+            memory.save("assistant", directAction.type + ":" + directAction.args.dump());
             if (!feedback.empty()) tts.speak(feedback);
         } else {
             // unknown — send to LLM for reasoning
             auto sysCtx = Context::capture();
             Logger::info("Context: app=" + sysCtx.activeApp + " window=" + sysCtx.activeWindow);
+
+            // answer simple context queries directly — no LLM needed
+            auto lt = lower(text);
+            std::string directAnswer;
+            if ((lt.find("what app") != std::string::npos ||
+                 lt.find("which app") != std::string::npos) &&
+                !sysCtx.activeApp.empty()) {
+                directAnswer = "You're using " + sysCtx.activeApp + ".";
+            } else if ((lt.find("what's in my clipboard") != std::string::npos ||
+                        lt.find("what did i copy") != std::string::npos ||
+                        lt.find("read clipboard") != std::string::npos) &&
+                       !sysCtx.clipboard.empty()) {
+                directAnswer = "Your clipboard says: " + sysCtx.clipboard;
+            } else if (lt.find("what window") != std::string::npos &&
+                       !sysCtx.activeWindow.empty()) {
+                directAnswer = "The window title is " + sysCtx.activeWindow + ".";
+            }
+            if (!directAnswer.empty()) {
+                Logger::info("Context query → " + directAnswer);
+                memory.save("user", text);
+                memory.save("assistant", directAnswer);
+                tts.speak(directAnswer);
+                recorder.unmute();
+                maybeSummarize();
+                continue;
+            }
+
             LLMContext ctx;
             ctx.activeApp     = sysCtx.activeApp;
             ctx.activeWindow  = sysCtx.activeWindow;
             ctx.clipboard     = sysCtx.clipboard;
+            ctx.screenText    = sysCtx.screenText;
             ctx.memorySummary = memory.getSummary();
 
             auto userName = memory.getFact("user_name");
@@ -138,25 +296,116 @@ void Daemon::run() {
                  lower(text).find("hey")   != std::string::npos))
                 prompt = text + " (user's name is " + userName + ")";
 
-            auto response = llm.think(prompt, ctx);
+            // ─── Streaming LLM → Streaming TTS ───
+            tts.startStream();
+            auto response = llm.thinkStreaming(prompt, ctx,
+                [&tts](const std::string& delta) {
+                    tts.feedChunk(delta);
+                });
+
+            memory.save("user", text);
 
             if (response.hasAction()) {
-                Logger::info("LLM action: " + response.action.type +
-                             " → " + response.action.param);
-                std::string feedback = executor.execute(response.action);
-                memory.save("user", text);
-                memory.save("assistant", response.action.type + ":" + response.action.param);
-                if (response.speech.empty() && !feedback.empty())
-                    tts.speak(feedback);
-            }
-            if (!response.speech.empty()) {
-                memory.save("user", text);
-                memory.save("assistant", response.speech);
-                tts.speak(response.speech);
+                // Tool calls arrived — end the text stream (may be empty)
+                tts.endStream();
+
+                // Check if any action is a "run" command (needs observation feedback)
+                bool hasRunAction = false;
+                for (auto& a : response.actions)
+                    if (a.type == "run") hasRunAction = true;
+
+                auto lt2 = lower(text);
+                bool isMultiStep = (lt2.find(" and ") != std::string::npos ||
+                                    lt2.find(" then ") != std::string::npos ||
+                                    lt2.find("set up") != std::string::npos ||
+                                    lt2.find("setup")  != std::string::npos);
+                bool useReact = hasRunAction || isMultiStep;
+
+                if (useReact) {
+                    // ReAct loop — execute, observe, let LLM decide next step
+                    constexpr int MAX_REACT_STEPS = 5;
+                    int step = 0;
+
+                    while (response.hasAction() && !response.done && step < MAX_REACT_STEPS) {
+                        std::string observation;
+
+                        for (auto& act : response.actions) {
+                            if (act.type == "done") {
+                                response.done = true;
+                                std::string summary = arg(act.args, "summary");
+                                Logger::info("ReAct: task complete — " + summary);
+                                memory.save("assistant", "task_done:" + summary);
+                                tts.speak(summary);
+                                break;
+                            }
+
+                            Logger::info("ReAct step " + std::to_string(step + 1) +
+                                         ": " + act.type + " → " + act.args.dump());
+
+                            std::string result;
+                            if (act.type == "run") {
+                                result = executor.shellCapture(arg(act.args, "command"));
+                            } else {
+                                result = executeAction(act);
+                            }
+                            memory.save("assistant", act.type + ":" + act.args.dump());
+
+                            if (!observation.empty()) observation += "\n";
+                            observation += result;
+                        }
+
+                        if (response.done) break;
+
+                        if (!response.speech.empty())
+                            tts.speak(response.speech);
+
+                        step++;
+                        if (step >= MAX_REACT_STEPS) {
+                            Logger::warn("ReAct: hit max steps (" + std::to_string(MAX_REACT_STEPS) + ")");
+                            tts.speak("Done after " + std::to_string(step) + " steps.");
+                            break;
+                        }
+
+                        auto freshCtx = Context::capture();
+                        ctx.activeApp    = freshCtx.activeApp;
+                        ctx.activeWindow = freshCtx.activeWindow;
+                        ctx.clipboard    = freshCtx.clipboard;
+                        ctx.screenText   = freshCtx.screenText;
+
+                        // Stream react response too
+                        tts.startStream();
+                        response = llm.reactStreaming(observation, ctx,
+                            [&tts](const std::string& delta) {
+                                tts.feedChunk(delta);
+                            });
+                        tts.endStream();
+                    }
+                } else {
+                    // Simple action(s) — execute directly, no ReAct
+                    for (auto& act : response.actions) {
+                        Logger::info("LLM action: " + act.type + " → " + act.args.dump());
+                        std::string feedback = executeAction(act);
+                        memory.save("assistant", act.type + ":" + act.args.dump());
+                        if (response.speech.empty() && !feedback.empty())
+                            tts.speak(feedback);
+                    }
+                }
+
+                // Speak any speech that came with tool calls
+                if (!response.speech.empty() && response.hasAction()) {
+                    memory.save("assistant", response.speech);
+                    tts.speak(response.speech);
+                }
+            } else {
+                // Pure conversational response — stream already fed to TTS
+                tts.endStream();
+                if (!response.speech.empty())
+                    memory.save("assistant", response.speech);
             }
         }
 
         recorder.unmute();
+        maybeSummarize();
     }
 });
 

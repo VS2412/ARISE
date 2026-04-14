@@ -6,7 +6,7 @@
 - **Platform:** Arch Linux, niri WM, Wayland, PipeWire
 - **Language:** C++20
 - **Branch:** `Aria.v2`
-- **Size:** ~3,280 LOC across 20 source files
+- **Size:** ~3,345 LOC across 20 source files
 - **Binary:** `build/ai-agent`
 - **Runtime:** systemd user service `ai-agent.service`
 - **Logs:** `~/.ai-agent.log` + journal
@@ -77,11 +77,12 @@ parec (ALSA)
 - Rolling history: `MAX_HISTORY = 16`.
 - Batch `think()`/`react()` wrap streaming variants with null callback.
 
-### 4.6 Executor (`src/executor.*` ~380 LOC)
+### 4.6 Executor (`src/executor.*` ~445 LOC)
 - Maps `AgentAction{type, args}` to shell commands.
 - `shellCapture()` — popen with 2000-char truncation for LLM ReAct observations.
 - `kAppMap` resolves friendly names ("browser", "vs code", "files") to binaries.
 - Timer actions return sentinel `"__TIMER__"` (never reached — daemon intercepts).
+- **Safety layer (Phase 7):** `checkSafety()` three-tier guard (`Allow`/`Caution`/`Deny`) gates `run_command`. `proc_kill` refuses PID ≤ 1 and critical names via `isCriticalProc()`.
 
 ### 4.7 Context (`src/context.*`, `src/screen.*`)
 - Snapshot of: active window/app (niri JSON), clipboard (wl-paste), screen OCR (tesseract via grim).
@@ -161,6 +162,7 @@ CREATE VIRTUAL TABLE conversations_fts USING fts5(
 - FTS5 external-content `NOT EXISTS` checks are unreliable — use `docsize` count to decide rebuild.
 - Timer and `recall_memory` actions MUST be intercepted by daemon before reaching executor.
 - SQLite opens in default serialized mode — safe to share `db_` across threads (summarizer thread, processor thread).
+- Safety guard runs on the raw command string pre-shell; patterns are case-insensitive substring matches — tune `kDenyPatterns` / `kCautionPatterns` / `kCriticalProcs` in `executor.cpp` if false positives surface.
 
 ## 8. Runtime Controls
 
@@ -196,7 +198,7 @@ src/
 ├── intent.hpp         6
 ├── llm.cpp         ~870   Ollama streaming + 27 tools + summarize
 ├── llm.hpp           81
-├── executor.cpp    ~380   25+ action handlers
+├── executor.cpp    ~445   25+ action handlers + safety guard
 ├── executor.hpp      11
 ├── context.cpp     ~110   niri/wl-paste/OCR capture
 ├── context.hpp       13
@@ -219,7 +221,7 @@ src/
 | 1 — Streaming Pipeline | ✅ Done | Ollama NDJSON streaming, sentence-buffered TTS, tightened VAD |
 | 2 — Richer Tools | ✅ Done | +14 tools: files, windows, processes, timers, web, sysinfo |
 | 3 — Deep Memory | ✅ Done | FTS5, summaries (20-turn threshold), recall_memory, enhanced facts |
-| 7 — Security Hardening | ⏭ Next | Command denylist, caution prompts, fork/execvp |
+| 7 — Security Hardening | ✅ Done | 3-tier safety guard (Deny/Caution/Allow) on run_command + proc_kill |
 | 6 — Latency Polish | Pending | Cached OCR, parallel context, whisper no_context |
 | 4 — Wake Word | Pending | openWakeWord sidecar + follow-up window state machine |
 | 5 — Conversational Quality | Pending | ask_user tool, richer prompts, tone detection |

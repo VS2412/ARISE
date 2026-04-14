@@ -656,9 +656,19 @@ void LLM::processStreamLine(const std::string& line, StreamState& state) {
 
         bool isDone = chunk.value("done", false);
 
+        // Capture tool_calls from ANY chunk — Ollama emits them in a non-final
+        // chunk with empty content for some models (e.g. qwen3).
+        if (chunk.contains("message")) {
+            auto& m = chunk["message"];
+            if (m.contains("tool_calls") && m["tool_calls"].is_array()
+                && !m["tool_calls"].empty()) {
+                state.finalMsg = chunk;
+                state.hasFinal = true;
+            }
+        }
+
         if (isDone) {
-            // Final chunk — may contain tool_calls
-            if (chunk.contains("message")) {
+            if (!state.hasFinal && chunk.contains("message")) {
                 state.finalMsg = chunk;
                 state.hasFinal = true;
             }
@@ -832,8 +842,12 @@ void LLM::updateHistory(const std::string& userText, const LLMResponse& result,
 
     if (result.hasAction()) {
         std::string actionLog;
-        for (auto& a : result.actions)
-            actionLog += "[" + a.type + ": " + a.args.dump() + "] ";
+        for (auto& a : result.actions) {
+            if (!actionLog.empty()) actionLog += "; ";
+            actionLog += "(called tool " + a.type + ")";
+        }
+        if (!result.speech.empty())
+            actionLog = result.speech + " " + actionLog;
         history_.push_back({"assistant", actionLog});
     } else if (!result.speech.empty()) {
         history_.push_back({"assistant", result.speech});

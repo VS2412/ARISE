@@ -218,6 +218,9 @@ void Daemon::run() {
         }).detach();
     };
 
+    std::string lastFactKey_;
+    auto lastFactTime_ = std::chrono::steady_clock::now();
+
     std::thread processor([&]() {
     while (!shutdownRequested.load()) {
         std::unique_lock<std::mutex> lock(qMutex);
@@ -248,7 +251,35 @@ void Daemon::run() {
         for (auto& [k, v] : newFacts) {
             memory.setFact(k, v);
             Logger::info("Memory: learned " + k + " = " + v);
+            lastFactKey_ = k;
         }
+
+        // Correction path: if user immediately follows a fact with
+        // "actually X" / "it's X" / "I meant X" / "no it's X", overwrite the
+        // most recently set fact with the corrected value. Scoped to the
+        // last ~2 minutes to avoid spurious rewrites later in the session.
+        if (newFacts.empty() && !lastFactKey_.empty()) {
+            auto now = std::chrono::steady_clock::now();
+            auto ageSec = std::chrono::duration_cast<std::chrono::seconds>(
+                              now - lastFactTime_).count();
+            if (ageSec <= 120) {
+                std::regex corrRe(
+                    R"(^\s*(?:-\s*)?(?:actually|sorry|no[, ]|i meant|i mean|it'?s|it is)\s+([A-Za-z0-9][A-Za-z0-9 .\-+_]{0,60}?)\s*[.!?]?\s*$)",
+                    std::regex::icase);
+                std::smatch m;
+                if (std::regex_search(text, m, corrRe)) {
+                    std::string v = m[1].str();
+                    while (!v.empty() && (v.back()  == ' ' || v.back()  == '\t')) v.pop_back();
+                    while (!v.empty() && (v.front() == ' ' || v.front() == '\t')) v.erase(v.begin());
+                    if (!v.empty() && v.size() < 80) {
+                        memory.setFact(lastFactKey_, v);
+                        Logger::info("Memory: corrected " + lastFactKey_ + " → " + v);
+                    }
+                }
+            }
+        }
+        if (!newFacts.empty())
+            lastFactTime_ = std::chrono::steady_clock::now();
 
         // INTENT CLASSIFIER FIRST — runs before word count filter
         // so "open firefox" (2 words) still works

@@ -2,10 +2,31 @@
 #include "logger.hpp"
 #include <fstream>
 #include <cstdlib>
+#include <cctype>
 #include <filesystem>
 #include <csignal>
 #include <unistd.h>
 #include <sys/wait.h>
+
+// Strip UTF-8 sequences of 3+ bytes (covers all emoji planes, dingbats,
+// smart quotes/dashes that Piper mispronounces). Keeps ASCII + 2-byte
+// Latin-1/accented letters intact.
+static std::string stripHighUnicode(const std::string& in) {
+    std::string out;
+    out.reserve(in.size());
+    for (size_t i = 0; i < in.size(); ) {
+        unsigned char c = static_cast<unsigned char>(in[i]);
+        if (c < 0x80) { out.push_back(in[i]); i += 1; continue; }
+        if ((c & 0xE0) == 0xC0) { // 2-byte UTF-8 — keep
+            if (i + 1 < in.size()) { out.push_back(in[i]); out.push_back(in[i+1]); }
+            i += 2; continue;
+        }
+        if ((c & 0xF0) == 0xE0) { i += 3; continue; } // 3-byte — drop
+        if ((c & 0xF8) == 0xF0) { i += 4; continue; } // 4-byte — drop
+        i += 1; // stray continuation byte — skip
+    }
+    return out;
+}
 
 namespace fs = std::filesystem;
 
@@ -47,13 +68,22 @@ void TTS::runAndTrack(const std::string& cmd) {
 void TTS::speakSentence(const std::string& text) {
     if (text.empty() || !available_) return;
 
+    // Belt-and-suspenders: strip emoji/3+ byte UTF-8 for any path that
+    // bypasses feedChunk (batch speak, timer announcements, etc.).
+    std::string clean = stripHighUnicode(text);
+    auto s = clean.find_first_not_of(" \t\n\r");
+    auto e = clean.find_last_not_of(" \t\n\r");
+    if (s == std::string::npos) return;
+    clean = clean.substr(s, e - s + 1);
+    if (clean.empty()) return;
+
     // Write text to temp file (avoids shell escaping issues with echo)
     std::ofstream f("/tmp/aria_tts_in.txt");
     if (!f) { Logger::error("TTS: cannot write temp file"); return; }
-    f << text;
+    f << clean;
     f.close();
 
-    Logger::info("TTS: speaking → " + text.substr(0, 80));
+    Logger::info("TTS: speaking → " + clean.substr(0, 80));
 
     // Pipe WAV from piper stdout directly into pw-play — no intermediate file
     std::string cmd =
@@ -104,7 +134,7 @@ void TTS::startStream() {
 void TTS::feedChunk(const std::string& text) {
     if (!streaming_.load() || text.empty()) return;
 
-    streamBuffer_ += text;
+    streamBuffer_ += stripHighUnicode(text);
 
     // Check for sentence boundaries and enqueue complete sentences
     // Sentence ends: ". " "? " "! " or newline, or buffer > 120 chars
@@ -115,8 +145,19 @@ void TTS::feedChunk(const std::string& text) {
         for (size_t i = 0; i < streamBuffer_.size(); i++) {
             char c = streamBuffer_[i];
             if (c == '.' || c == '?' || c == '!') {
+                bool atEnd    = (i + 1 >= streamBuffer_.size());
+                bool prevDig  = (i > 0 && std::isdigit(static_cast<unsigned char>(streamBuffer_[i-1])));
+                bool nextDig  = !atEnd && std::isdigit(static_cast<unsigned char>(streamBuffer_[i+1]));
+
+                // Decimal point like "8.1" — never a sentence boundary.
+                if (c == '.' && prevDig && nextDig) continue;
+
+                // Trailing "8." at buffer end — could be a decimal waiting for
+                // the next streamed chunk. Defer; wait for more content.
+                if (c == '.' && prevDig && atEnd) { breakPos = std::string::npos; break; }
+
                 // Check if followed by space, newline, or end of buffer
-                if (i + 1 >= streamBuffer_.size() || streamBuffer_[i + 1] == ' ' ||
+                if (atEnd || streamBuffer_[i + 1] == ' ' ||
                     streamBuffer_[i + 1] == '\n') {
                     breakPos = i + 1;
                     break;

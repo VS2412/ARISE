@@ -19,6 +19,7 @@
 #include <cctype>
 #include <cstdlib>
 #include <map>
+#include <regex>
 #include <sstream>
 
 Daemon::Daemon(std::atomic<bool>& flag, std::atomic<bool>& pause)
@@ -90,12 +91,29 @@ static std::map<std::string, std::string> extractFacts(const std::string& text) 
     if (!job.empty() && job.size() < 80) facts["job"] = job;
 
     // Preference
-    auto pref = firstMatch({"i prefer ", "i like using ", "i swear by "});
+    auto pref = firstMatch({"i prefer ", "i like using ", "i swear by ", "i love ", "i really like "});
     if (!pref.empty() && pref.size() < 80) facts["preference"] = pref;
 
     // Current project
     auto proj = firstMatch({"i'm working on ", "i am working on ", "my project is ", "i'm building "});
     if (!proj.empty() && proj.size() < 120) facts["current_project"] = proj;
+
+    // Favorite <topic> is <value> — captures topic dynamically as favorite_<topic>
+    {
+        std::regex favRe(R"(my favou?rite (\w+(?:\s+\w+)?) (?:is|are) ([^.,!?;\n]+))",
+                         std::regex::icase);
+        std::smatch m;
+        if (std::regex_search(text, m, favRe)) {
+            std::string topic = m[1].str();
+            std::string val   = m[2].str();
+            std::transform(topic.begin(), topic.end(), topic.begin(), ::tolower);
+            for (auto& c : topic) if (c == ' ') c = '_';
+            while (!val.empty() && (val.back()  == ' ' || val.back()  == '\t')) val.pop_back();
+            while (!val.empty() && (val.front() == ' ' || val.front() == '\t')) val.erase(val.begin());
+            if (!val.empty() && val.size() < 80)
+                facts["favorite_" + topic] = val;
+        }
+    }
 
     return facts;
 }

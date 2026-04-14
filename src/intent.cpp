@@ -150,9 +150,12 @@ AgentAction classifyIntent(const std::string& raw) {
     if (t.rfind("type ", 0) == 0)
         return {"type", {{"text", raw.substr(5)}}};
 
-    // GOOGLE SEARCH
+    // WEB SEARCH — only explicit web-search phrasing.
+    // Bare "search X" falls through to LLM so it can pick file_search vs web_search.
     {
-        std::regex gRe(R"((?:google|search(?:\s+for)?)\s+(.+))");
+        std::regex gRe(
+            R"((?:^|\s)(?:google(?:\s+for)?|search\s+(?:the\s+web|online|the\s+internet|google|wikipedia|ddg|duckduckgo)(?:\s+for)?|web\s+search(?:\s+for)?|look\s+up)\s+(.+))"
+        );
         std::smatch m;
         if (std::regex_search(t, m, gRe)) {
             std::string query = m[1].str();

@@ -80,6 +80,55 @@ static std::string resolveApp(const std::string& raw) {
     return raw; // pass through verbatim
 }
 
+// Phase 7: Safety guard for LLM-driven commands
+enum class Safety { Allow, Caution, Deny };
+
+static const std::vector<std::string> kDenyPatterns = {
+    "rm -rf /", "rm -rf /*", "rm -rf --no-preserve-root", "rm -rf ~",
+    "rm -rf $home", "rm -rf ${home}",
+    "mkfs", "dd if=", "dd of=/dev/sd", "dd of=/dev/nvme", "dd of=/dev/disk",
+    ":(){ :|:& };:", ":(){:|:&};:",
+    "> /dev/sda", "> /dev/nvme", "> /dev/disk",
+    "chmod -r 777 /", "chmod 777 /",
+    "shutdown", "reboot", "halt", "poweroff", "init 0", "init 6",
+    "systemctl poweroff", "systemctl reboot", "systemctl halt",
+    " | sh", " | bash", " |sh", " |bash",
+    "userdel ", "passwd root",
+    "> /etc/passwd", "> /etc/shadow",
+    "fdisk /dev/", "parted /dev/", "wipefs",
+};
+
+static const std::vector<std::string> kCautionPatterns = {
+    "sudo ", "rm -r ", "rm -rf ", "rm -f ",
+    "kill -9", "killall", "pkill -9",
+    "chmod ", "chown ", "mount ", "umount ",
+    "iptables", "nft ",
+};
+
+static Safety checkSafety(const std::string& cmd) {
+    std::string lower = cmd;
+    std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+    for (const auto& p : kDenyPatterns)
+        if (lower.find(p) != std::string::npos) return Safety::Deny;
+    for (const auto& p : kCautionPatterns)
+        if (lower.find(p) != std::string::npos) return Safety::Caution;
+    return Safety::Allow;
+}
+
+static const std::vector<std::string> kCriticalProcs = {
+    "systemd", "init", "kthreadd", "kernel",
+    "pipewire", "wireplumber", "wayland", "niri", "ai-agent",
+    "dbus", "sshd", "Xwayland",
+};
+
+static bool isCriticalProc(const std::string& target) {
+    std::string t = target;
+    std::transform(t.begin(), t.end(), t.begin(), ::tolower);
+    for (const auto& p : kCriticalProcs)
+        if (t.find(p) != std::string::npos) return true;
+    return false;
+}
+
 void Executor::shell(const std::string& cmd) {
     Logger::info("Executor: " + cmd);
     system((cmd + " &").c_str());
@@ -116,6 +165,13 @@ std::string Executor::execute(const AgentAction& action) {
     if (action.type == "run") {
         std::string cmd = arg(action.args, "command");
         if (cmd.empty()) return "";
+        Safety s = checkSafety(cmd);
+        if (s == Safety::Deny) {
+            Logger::warn("Executor: DENIED destructive command: " + cmd);
+            return "I won't run that. The command looks destructive.";
+        }
+        if (s == Safety::Caution)
+            Logger::warn("Executor: CAUTION elevated command: " + cmd);
         shell(cmd);
         return "Running that now.";
     }
@@ -312,10 +368,18 @@ std::string Executor::execute(const AgentAction& action) {
     if (action.type == "proc_kill") {
         std::string target = arg(action.args, "target");
         if (target.empty()) return "No process specified.";
-        // Check if it's a PID (all digits) or a name
         bool isPid = std::all_of(target.begin(), target.end(), ::isdigit);
         if (isPid) {
+            int pid = std::atoi(target.c_str());
+            if (pid <= 1) {
+                Logger::warn("Executor: DENIED kill of pid " + target);
+                return "I won't kill that process.";
+            }
             return shellCapture("kill " + target);
+        }
+        if (isCriticalProc(target)) {
+            Logger::warn("Executor: DENIED kill of critical process: " + target);
+            return "I won't kill " + target + " — it's a critical process.";
         }
         return shellCapture("pkill -f " + q(target));
     }

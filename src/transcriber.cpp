@@ -69,6 +69,8 @@ std::string Transcriber::transcribe(const std::string& wavPath) {
     wp.print_timestamps  = false;
     wp.single_segment    = false;
     wp.no_speech_thold   = 0.3f;
+    wp.no_context        = true;  // each utterance is independent; skip KV carryover
+    wp.suppress_blank    = true;
     wp.initial_prompt    = "open firefox, open terminal, open code, volume up, volume down, switch workspace, run command, type text"; // command vocabulary hint
 
     auto t0 = std::chrono::steady_clock::now();

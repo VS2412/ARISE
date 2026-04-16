@@ -21,6 +21,8 @@
 #include <map>
 #include <regex>
 #include <sstream>
+#include <ctime>
+#include <optional>
 
 Daemon::Daemon(std::atomic<bool>& flag, std::atomic<bool>& pause)
     : shutdownRequested(flag), pauseToggle(pause) {}
@@ -37,6 +39,25 @@ static bool isInterruptCommand(const std::string& text) {
            t.find("shut up")  != std::string::npos ||
            t.find("quiet")    != std::string::npos ||
            t.find("enough")   != std::string::npos;
+}
+
+// Wake-word detection. Whisper often mis-hears "aria" as "area", "ariah",
+// "arya", "ariya" — so we accept a small family. Returns the suffix AFTER
+// the wake phrase (possibly empty if user just said the name).
+// nullopt means no wake phrase was found.
+static std::optional<std::string> stripWakeWord(const std::string& text) {
+    static const std::regex wakeRe(
+        R"(^\s*(?:hey[,\s]+|ok[,\s]+|okay[,\s]+)?(?:aria|arya|ariah|ariya|area)[,\s.!?:-]*)",
+        std::regex::icase);
+    std::smatch m;
+    if (!std::regex_search(text, m, wakeRe)) return std::nullopt;
+    // Require the match to start at position 0 (with only leading whitespace)
+    if (m.position(0) != 0) return std::nullopt;
+    std::string rest = text.substr(m.position(0) + m.length(0));
+    // Trim
+    while (!rest.empty() && (rest.front() == ' ' || rest.front() == '\t')) rest.erase(rest.begin());
+    while (!rest.empty() && (rest.back()  == ' ' || rest.back()  == '\t')) rest.pop_back();
+    return rest;
 }
 
 // count real words (skip punctuation-only tokens)
@@ -118,6 +139,54 @@ static std::map<std::string, std::string> extractFacts(const std::string& text) 
     return facts;
 }
 
+// Phase 5: detect user mood from transcribed speech.
+// Lightweight regex-based classifier — returns "" (neutral), "frustrated",
+// "urgent", or "curious". Feeds the LLM system prompt so replies adapt.
+static std::string detectTone(const std::string& text) {
+    auto t = lower(text);
+
+    // Frustration markers — profanity-adjacent, repeated "why", "not working"
+    static const std::regex frustRe(
+        R"((damn|dammit|shit|crap|wtf|ugh|come on|why isn'?t|not working|broken|still not|again\?|seriously|whatever))",
+        std::regex::icase);
+    // Urgency — "now", "quick", "fast", "asap", "hurry"
+    static const std::regex urgRe(
+        R"(\b(now|asap|quickly|quick|fast|hurry|right now|immediately)\b)",
+        std::regex::icase);
+    // Curiosity — "how does", "what is", "why does", "explain", "tell me about"
+    static const std::regex curRe(
+        R"(\b(how does|how do|what is|why does|why is|explain|tell me about|curious|wonder(?:ing)?)\b)",
+        std::regex::icase);
+
+    if (std::regex_search(t, frustRe)) return "frustrated";
+    if (std::regex_search(t, urgRe))   return "urgent";
+    if (std::regex_search(t, curRe))   return "curious";
+    return "";
+}
+
+// Time-of-day bucket from local wall clock.
+static std::string currentTimeOfDay() {
+    std::time_t now = std::time(nullptr);
+    std::tm lt{};
+    localtime_r(&now, &lt);
+    int h = lt.tm_hour;
+    if (h < 5)  return "night";
+    if (h < 12) return "morning";
+    if (h < 17) return "afternoon";
+    if (h < 21) return "evening";
+    return "night";
+}
+
+// "Thursday, April 15" — concise date label for the system prompt.
+static std::string currentDateLabel() {
+    std::time_t now = std::time(nullptr);
+    std::tm lt{};
+    localtime_r(&now, &lt);
+    char buf[64];
+    if (std::strftime(buf, sizeof(buf), "%A, %B %e", &lt) == 0) return "";
+    return buf;
+}
+
 // Helper: get a string from JSON args
 static std::string arg(const nlohmann::json& a, const std::string& key) {
     if (a.contains(key) && a[key].is_string()) return a[key].get<std::string>();
@@ -180,7 +249,9 @@ void Daemon::run() {
         return "";
     };
 
-    // Execute an action, routing timers and memory recall to internal handlers
+    // Execute an action, routing timers, memory recall, and clarification asks
+    // to internal handlers. ask_user just speaks the question — the next user
+    // utterance continues via LLM history, no ReAct hop needed.
     auto executeAction = [&](const AgentAction& act) -> std::string {
         if (act.type == "timer_set" || act.type == "timer_list" || act.type == "timer_cancel")
             return handleTimerAction(act);
@@ -193,6 +264,10 @@ void Daemon::run() {
             for (auto& r : results)
                 out << "[" << r.timestamp << "] " << r.role << ": " << r.content << "\n";
             return out.str();
+        }
+        if (act.type == "ask") {
+            std::string q = arg(act.args, "question");
+            return q.empty() ? "What should I do?" : q;
         }
         return executor.execute(act);
     };
@@ -221,6 +296,17 @@ void Daemon::run() {
     std::string lastFactKey_;
     auto lastFactTime_ = std::chrono::steady_clock::now();
 
+    // Phase 4: wake-word mode. When ARIA_WAKE_WORD is set, ARIA only responds
+    // if the utterance begins with the wake phrase. After a successful
+    // activation, a 5-second follow-up window lets the user chain commands
+    // without repeating "Aria".
+    const char* wakeEnv = std::getenv("ARIA_WAKE_WORD");
+    const bool wakeRequired = (wakeEnv && wakeEnv[0] != '\0' && wakeEnv[0] != '0');
+    std::chrono::steady_clock::time_point awakeUntil{};
+    constexpr auto kFollowUpWindow = std::chrono::seconds(5);
+    if (wakeRequired)
+        Logger::info("Wake-word mode enabled (say 'Aria' to activate).");
+
     std::thread processor([&]() {
     while (!shutdownRequested.load()) {
         std::unique_lock<std::mutex> lock(qMutex);
@@ -244,6 +330,36 @@ void Daemon::run() {
             tts.interrupt();
             Logger::info("ARIA: interrupted.");
             continue;
+        }
+
+        // ─── Wake-word gate ───
+        // ALWAYS mode: skip entirely. WAKE_WORD mode: require wake phrase
+        // unless we're still inside the 5s follow-up window.
+        if (wakeRequired) {
+            auto now = std::chrono::steady_clock::now();
+            bool awake = (awakeUntil > now);
+            auto stripped = stripWakeWord(text);
+            if (stripped.has_value()) {
+                // Wake phrase present — strip it and activate.
+                text = *stripped;
+                awakeUntil = now + kFollowUpWindow;
+                if (text.empty()) {
+                    // User said just "Aria" / "Hey Aria" — acknowledge and wait.
+                    recorder.mute();
+                    tts.speak("Yes?");
+                    recorder.unmute();
+                    Logger::info("Wake: acknowledged, awaiting follow-up.");
+                    continue;
+                }
+                Logger::info("Wake: activated → " + text);
+            } else if (awake) {
+                // Inside follow-up window — accept utterance, extend window.
+                awakeUntil = now + kFollowUpWindow;
+                Logger::info("Wake: follow-up accepted.");
+            } else {
+                Logger::info("Wake: asleep, ignored: " + text);
+                continue;
+            }
         }
 
         // Passive fact extraction — learn name, location, job, preferences, projects
@@ -337,6 +453,11 @@ void Daemon::run() {
             ctx.clipboard     = sysCtx.clipboard;
             ctx.screenText    = sysCtx.screenText;
             ctx.memorySummary = memory.getSummary();
+            ctx.tone          = detectTone(text);
+            ctx.timeOfDay     = currentTimeOfDay();
+            ctx.dateLabel     = currentDateLabel();
+            if (!ctx.tone.empty())
+                Logger::info("Tone: " + ctx.tone);
 
             auto userName = memory.getFact("user_name");
             std::string prompt = text;
@@ -393,7 +514,9 @@ void Daemon::run() {
 
                             std::string result;
                             if (act.type == "run") {
-                                result = executor.shellCapture(arg(act.args, "command"));
+                                // Route through the safety-guarded capture so ReAct-driven
+                                // shell commands get the same deny list as the non-ReAct path.
+                                result = executor.safeShellCapture(arg(act.args, "command"));
                             } else {
                                 result = executeAction(act);
                             }

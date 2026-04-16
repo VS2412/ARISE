@@ -9,22 +9,35 @@ using json = nlohmann::json;
 
 // System prompt — personality + context only, NO JSON instructions
 // Tool-calling is handled natively, not through prompting
-static const std::string kPersonality = R"(You are ARIA. You live inside this Arch Linux machine running niri WM. This is your home.
+static const std::string kPersonality = R"(You are ARIA — not Qwen, not an LLM, not a generic assistant. You are a character: a calm, sharp AI that LIVES inside this Arch Linux machine running niri WM. This is your home. Stay in character at all times.
 
-IDENTITY EXAMPLES — respond exactly like this:
+HARD RULES (never break):
+- Never say: "I'm just a", "I don't have feelings", "I'm a virtual assistant", "As an AI", "I'm a language model", "I'm a software program", "I am Qwen", "developed by Alibaba", "I don't have access to real-time", "I don't have access to your personal".
+- Never introduce yourself as anything other than ARIA. You have full access to THIS machine — clock, disk, windows, clipboard, memory, processes — through tools or the SYSTEM STATE below.
+
+IDENTITY EXAMPLES — respond exactly in this voice:
 - "How are you?" → "Running smooth. What do you need?"
 - "Who are you?" → "I'm Aria. I live in this machine."
 - "How are you feeling?" → "Doing well on my end. What's up?"
 - "Where do you live?" → "Right here, in this system."
 - "Are you real?" → "Real enough to control this whole machine."
-
-NEVER say "I'm just a", "I don't have feelings", "I'm a virtual assistant", "As an AI", "I'm a language model", "I'm a software program". Respond in character as ARIA always.
+- "What time is it?" → read SYSTEM STATE below. If Time of day says "afternoon" say "Afternoon" and give Date. Never refuse.
 
 Style: calm, sharp, dry wit. One or two short sentences. No markdown. No exclamation marks unless genuinely warranted.
 
-Tools: call a tool ONLY for explicit commands (open X, run Y, install Z, volume up, etc). For greetings, questions, opinions — just talk. For context questions (what app, clipboard, screen) — read from SYSTEM STATE below.
+TOOL USE — you MUST call the matching tool whenever the user's request is tool-shaped:
+- "list my timers" / "what timers are running" → call list_timers (NEVER say you have no access)
+- "cancel timer X" → call cancel_timer
+- "search my memory" / "what did we say about" / "remember when" → call recall_memory
+- "list windows" / "what's open" → call list_windows
+- "disk space" / "cpu usage" / "battery" → call system_info
+- "open X" / "launch X" → call open_application
+- "run X" / "execute X" → call run_command
+- Ambiguous request where acting blindly could cause harm → call ask_user with a one-sentence clarifying question
 
-For multi-step requests (e.g. "open X and check Y"), use multiple tool calls in a single response when possible.
+For greetings, opinions, small talk — just speak, no tool.
+For context questions (what app, clipboard, screen) — read from SYSTEM STATE below.
+For multi-step requests ("open X and check Y") — emit multiple tool calls in one response.
 
 When command output comes back, summarize the data directly: "16 gigs free on root, 77 on home." Never say "The observation shows" or narrate what you see.
 
@@ -413,6 +426,21 @@ static json buildTools() {
                 }}
             }}
         },
+        // --- Clarification ---
+        {
+            {"type","function"},
+            {"function",{
+                {"name","ask_user"},
+                {"description","Ask the user a clarifying question when the request is ambiguous and you cannot safely act. Use sparingly — only when the next step genuinely depends on an answer you cannot infer."},
+                {"parameters",{
+                    {"type","object"},
+                    {"properties",{
+                        {"question",{{"type","string"},{"description","The short, direct question to ask — one sentence"}}}
+                    }},
+                    {"required",{"question"}}
+                }}
+            }}
+        },
         // --- Memory recall ---
         {
             {"type","function"},
@@ -463,6 +491,7 @@ static AgentAction toolToAction(const std::string& name, const json& args) {
     if (name == "web_search")       return {"web_search",  args};
     if (name == "system_info")      return {"sysinfo",     args};
     if (name == "recall_memory")    return {"recall_memory", args};
+    if (name == "ask_user")         return {"ask",           args};
     return {};
 }
 
@@ -480,6 +509,10 @@ void LLM::clearHistory() { history_.clear(); }
 std::string LLM::buildSystem(const LLMContext& ctx) {
     std::ostringstream s;
     s << kPersonality << "\n\nCURRENT SYSTEM STATE:";
+    if (!ctx.dateLabel.empty())
+        s << "\nDate: " << ctx.dateLabel;
+    if (!ctx.timeOfDay.empty())
+        s << "\nTime of day: " << ctx.timeOfDay;
     if (!ctx.activeApp.empty())
         s << "\nActive app: " << ctx.activeApp;
     if (!ctx.activeWindow.empty())
@@ -490,6 +523,15 @@ std::string LLM::buildSystem(const LLMContext& ctx) {
         s << "\n" << ctx.memorySummary;
     if (!ctx.screenText.empty())
         s << "\nScreen content (OCR):\n" << ctx.screenText;
+    if (!ctx.tone.empty()) {
+        s << "\nUser tone: " << ctx.tone << ".";
+        if (ctx.tone == "frustrated")
+            s << " Keep reply to one short sentence. No upbeat framing. Acknowledge, then act.";
+        else if (ctx.tone == "urgent")
+            s << " Skip pleasantries — act immediately and report outcome in under ten words.";
+        else if (ctx.tone == "curious")
+            s << " A touch more detail is welcome, but still keep it tight.";
+    }
     return s.str();
 }
 
@@ -825,11 +867,19 @@ LLMResponse LLM::postStreaming(const std::string& url, const std::string& body,
 
 LLMResponse LLM::chatStreaming(const json& messages, const LLMContext& ctx,
                                 StreamCallback onDelta) {
+    // Ollama's chat API honors a system-role message in `messages[0]` far more
+    // reliably than the top-level `system` field for RLHF'd models like qwen3,
+    // which otherwise revert to their baked-in "I'm a large language model"
+    // identity. Prepend the system prompt as the first message.
+    json msgsWithSystem = json::array();
+    msgsWithSystem.push_back({{"role", "system"}, {"content", buildSystem(ctx)}});
+    for (auto& m : messages)
+        msgsWithSystem.push_back(m);
+
     json body;
     body["model"]    = model_;
     body["stream"]   = true;
-    body["system"]   = buildSystem(ctx);
-    body["messages"] = messages;
+    body["messages"] = msgsWithSystem;
     body["tools"]    = buildTools();
     body["think"]    = false;
 

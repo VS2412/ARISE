@@ -4,6 +4,8 @@
 #include <cstdio>
 #include <memory>
 #include <string>
+#include <future>
+#include <chrono>
 #include <nlohmann/json.hpp>
 
 using json = nlohmann::json;
@@ -20,19 +22,63 @@ static std::string exec(const char* cmd) {
     return result;
 }
 
+// Terminal-like apps where OCR is both expensive (dense text) and
+// low-signal (command history + clipboard already carry the relevant text).
+// Skip OCR for these, fall through for GUI apps where OCR is most useful.
+static bool isTerminalApp(const std::string& app) {
+    static const char* kTerms[] = {
+        "org.gnome.Console", "alacritty", "Alacritty", "kitty",
+        "foot", "footclient", "wezterm", "terminator", "xterm",
+        "urxvt", "tilix", "konsole", "com.gexperts.Tilix"
+    };
+    for (auto* t : kTerms)
+        if (app == t) return true;
+    return false;
+}
+
+// Run niri + clipboard concurrently, then OCR keyed by whatever niri returned.
+// OCR is the heaviest call, so starting it after niri lets us (a) use the
+// correct cache key and (b) skip it entirely for terminals where the text is
+// already available via the clipboard path.
 SystemContext Context::capture() {
     SystemContext ctx;
 
-    try {
-        std::string raw = exec("niri msg --json focused-window 2>/dev/null");
-        if (!raw.empty()) {
-            auto j = json::parse(raw);
-            ctx.activeApp    = j.value("app_id", "");
-            ctx.activeWindow = j.value("title",  "");
-        }
-    } catch (...) {}
+    auto t0 = std::chrono::steady_clock::now();
 
-    ctx.clipboard   = exec("wl-paste --no-newline 2>/dev/null | head -c 120");
-    ctx.screenText  = Screen::capture();
+    auto niriF = std::async(std::launch::async, []() -> std::pair<std::string, std::string> {
+        try {
+            std::string raw = exec("niri msg --json focused-window 2>/dev/null");
+            if (raw.empty()) return {"", ""};
+            auto j = json::parse(raw);
+            return { j.value("app_id", ""), j.value("title", "") };
+        } catch (...) { return {"", ""}; }
+    });
+
+    auto clipF = std::async(std::launch::async, []() {
+        return exec("wl-paste --no-newline 2>/dev/null | head -c 120");
+    });
+
+    auto [app, win] = niriF.get();
+    ctx.activeApp    = app;
+    ctx.activeWindow = win;
+
+    std::future<std::string> screenF;
+    bool ocrSkipped = false;
+    if (isTerminalApp(app)) {
+        ocrSkipped = true;
+    } else {
+        std::string key = app + "|" + win;
+        screenF = std::async(std::launch::async, [key]() {
+            return Screen::capture(key);
+        });
+    }
+
+    ctx.clipboard  = clipF.get();
+    ctx.screenText = ocrSkipped ? std::string{} : screenF.get();
+
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                  std::chrono::steady_clock::now() - t0).count();
+    Logger::info("Context: captured in " + std::to_string(ms) + "ms" +
+                 (ocrSkipped ? " (OCR skipped for terminal)" : ""));
     return ctx;
 }

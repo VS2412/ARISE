@@ -297,13 +297,11 @@ std::string Memory::getSummary() const {
             out << "[" << s.timestamp << "] " << s.content << "\n";
     }
 
-    // Recent turns — working memory
-    auto recent = getRecent(6);
-    if (!recent.empty()) {
-        out << "Recent conversation:\n";
-        for (const auto& e : recent)
-            out << e.role << ": " << e.content << "\n";
-    }
+    // Deliberately NOT dumping recent raw turns here — the LLM maintains its
+    // own rolling message history inside the chat request, and re-injecting
+    // the DB copy was leaking pre-Phase-7 persona breakage ("I'm Qwen", "I
+    // don't have access") back into the system prompt and causing the model
+    // to mimic its own older bad output. Facts + summaries are enough.
 
     return out.str();
 }

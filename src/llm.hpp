@@ -24,6 +24,9 @@ struct LLMContext {
     std::string clipboard;
     std::string memorySummary;
     std::string screenText;
+    std::string tone;          // detected user mood: "", "frustrated", "urgent", "casual", "curious"
+    std::string timeOfDay;     // "morning" | "afternoon" | "evening" | "night"
+    std::string dateLabel;     // e.g. "Thursday, April 15"
 };
 
 using StreamCallback = std::function<void(const std::string& delta)>;

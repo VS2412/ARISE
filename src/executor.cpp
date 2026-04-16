@@ -134,6 +134,17 @@ void Executor::shell(const std::string& cmd) {
     system((cmd + " &").c_str());
 }
 
+std::string Executor::safeShellCapture(const std::string& cmd) {
+    Safety s = checkSafety(cmd);
+    if (s == Safety::Deny) {
+        Logger::warn("Executor: DENIED destructive command (ReAct): " + cmd);
+        return "I won't run that. The command looks destructive.";
+    }
+    if (s == Safety::Caution)
+        Logger::warn("Executor: CAUTION elevated command (ReAct): " + cmd);
+    return shellCapture(cmd);
+}
+
 std::string Executor::shellCapture(const std::string& cmd) {
     Logger::info("Executor (capture): " + cmd);
     std::string result;

@@ -68,3 +68,9 @@ mlruns/
 *.bak
 *.sql
 *.dump
+
+
+claude.md
+claude*.md
+.claude/
+CLAUDE.md

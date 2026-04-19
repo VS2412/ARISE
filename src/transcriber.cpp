@@ -1,5 +1,6 @@
 #include "transcriber.hpp"
 #include "logger.hpp"
+#include "config.hpp"
 #include "whisper.h"
 #include <vector>
 #include <fstream>
@@ -8,10 +9,13 @@
 
 Transcriber::Transcriber(const std::string& modelPath) {
     whisper_context_params cparams = whisper_context_default_params();
-    cparams.use_gpu = true;
+    // Phase 9: default to CPU. Wake-word now gates transcription so whisper
+    // runs only on demand; keeping GPU resident would starve Ollama.
+    cparams.use_gpu = Config::get().whisper_gpu;
     ctx = whisper_init_from_file_with_params(modelPath.c_str(), cparams);
     if (!ctx) { Logger::error("Whisper: failed to load model: " + modelPath); return; }
-    Logger::info("Whisper model loaded: " + modelPath);
+    Logger::info(std::string("Whisper model loaded (") +
+                 (cparams.use_gpu ? "GPU" : "CPU") + "): " + modelPath);
 }
 
 Transcriber::~Transcriber() {
@@ -58,6 +62,15 @@ std::string Transcriber::transcribe(const std::string& wavPath) {
         return "";
     }
 
+    // Too short to be real speech — skip whisper to save GPU cycles.
+    // 1000 samples @ 16kHz = 62.5ms; any VAD-passed utterance shorter than
+    // that is almost always a click or doorbell that slipped through.
+    if (samples.size() < 1000) {
+        Logger::info("Transcriber: skipping short audio (" +
+                     std::to_string(samples.size()) + " samples)");
+        return "";
+    }
+
     Logger::info("Transcribing file: " + wavPath +
                  " (" + std::to_string(samples.size()) + " samples)");
 
@@ -75,9 +88,12 @@ std::string Transcriber::transcribe(const std::string& wavPath) {
 
     auto t0 = std::chrono::steady_clock::now();
     if (whisper_full(ctx, wp, samples.data(), (int)samples.size()) != 0) {
-        Logger::error("Transcriber: whisper_full() failed.");
+        ++consecutiveFailures_;
+        Logger::error("Transcriber: whisper_full() failed (fail #" +
+                      std::to_string(consecutiveFailures_) + ").");
         return "";
     }
+    consecutiveFailures_ = 0;
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                   std::chrono::steady_clock::now() - t0).count();
     Logger::info("Transcribe finished in " + std::to_string(ms) + " ms");

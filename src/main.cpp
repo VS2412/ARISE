@@ -1,5 +1,6 @@
 #include "daemon.hpp"
 #include "logger.hpp"
+#include "config.hpp"
 #include <csignal>
 #include <atomic>
 #include <cstdlib>
@@ -16,9 +17,9 @@ void pauseHandler(int)    { pauseToggle.store(true); }
 int main() {
     curl_global_init(CURL_GLOBAL_DEFAULT);
 
-    const char* home = std::getenv("HOME");
-    std::string logPath = home ? std::string(home) + "/.ai-agent.log" : "/tmp/ai-agent.log";
-    Logger::init(logPath);
+    // Config must be loaded before Logger::init so we can honor log_path.
+    Config::load();
+    Logger::init(Config::get().log_path);
 
     struct sigaction sa{};
     sa.sa_handler = shutdownHandler;

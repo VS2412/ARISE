@@ -118,10 +118,9 @@ AgentAction classifyIntent(const std::string& raw) {
         t.find("brightness down") != std::string::npos ||
         t.find("dim the") != std::string::npos)          return {"brightness", {{"action","down"}}};
 
-    // MEDIA
+    // MEDIA — bare play/pause first, then music search (needs explicit song/artist qualifier)
     if (t == "play" || t == "pause" ||
         t.find("play music")  != std::string::npos ||
-        t.find("play song")   != std::string::npos ||
         t.find("resume music")!= std::string::npos ||
         t.find("play pause")  != std::string::npos)      return {"media", {{"action","play"}}};
     if (t == "next" || t.find("next song") != std::string::npos ||
@@ -131,6 +130,23 @@ AgentAction classifyIntent(const std::string& raw) {
         t.find("previous track") != std::string::npos)   return {"media", {{"action","prev"}}};
     if (t.find("stop music")   != std::string::npos ||
         t.find("stop playing") != std::string::npos)     return {"media", {{"action","stop"}}};
+
+    // MUSIC SEARCH — "play <song>" / "play <artist>" / "play song <name>"
+    {
+        std::regex musicRe(
+            R"(^(?:play|put on)\s+(?:the\s+)?(?:song|track|album|artist\s+)?\s*(.+))",
+            std::regex::icase);
+        std::smatch m;
+        if (std::regex_search(t, m, musicRe)) {
+            std::string q = m[1].str();
+            // Drop trailing "on spotify"/"on youtube" so the search query is clean.
+            std::regex tailRe(R"(\s+on\s+(spotify|youtube|yt music|youtube music)\s*$)",
+                              std::regex::icase);
+            q = std::regex_replace(q, tailRe, "");
+            if (!q.empty())
+                return {"music_search", {{"query", q}}};
+        }
+    }
 
     // SCREENSHOT
     if (t.find("screenshot")    != std::string::npos ||
@@ -176,6 +192,15 @@ AgentAction classifyIntent(const std::string& raw) {
         t.find("read clipboard")         != std::string::npos ||
         t.find("what did i copy")        != std::string::npos)
         return {"clipboard", {{"action", "read"}}};
+
+    // NOTIFICATIONS
+    if (t.find("read notifications")  != std::string::npos ||
+        t.find("my notifications")    != std::string::npos ||
+        t.find("any notifications")   != std::string::npos ||
+        t.find("show notifications")  != std::string::npos ||
+        t.find("recent notifications")!= std::string::npos ||
+        t.find("check notifications") != std::string::npos)
+        return {"read_notifications", {}};
 
     // SYSTEM UPDATE — requires "system", "arch", or "pacman" alongside "update"
     if (t.find("update") != std::string::npos &&

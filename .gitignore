@@ -69,8 +69,77 @@ mlruns/
 *.sql
 *.dump
 
-
+DEMO.md
+project_context.md
+compile_commands.json
 claude.md
 claude*.md
 .claude/
 CLAUDE.md
+
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.dir/
+
+# Local cache
+.cache/
+
+# Pre-commit
+.pre-commit-cache/
+
+# C++ binaries
+*.o
+*.out
+*.a
+*.so
+*.exe
+*.dll
+
+# Temp
+tmp/
+temp/
+logs/
+
+# Optional (if training is data)
+# training/
+
+# ------------------------------
+# CMake / Build system
+# ------------------------------
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.dir/
+
+# ------------------------------
+# Local cache / tooling
+# ------------------------------
+.cache/
+.pre-commit-cache/
+
+# ------------------------------
+# C++ compiled artifacts
+# ------------------------------
+*.o
+*.out
+*.a
+*.so
+*.exe
+*.dll
+
+# ------------------------------
+# Logs / temp
+# ------------------------------
+logs/
+tmp/
+temp/
+
+# ------------------------------
+# Optional (UNCOMMENT if training = data)
+# ------------------------------
+# training/

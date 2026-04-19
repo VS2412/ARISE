@@ -6,6 +6,7 @@ struct SystemContext {
     std::string activeApp;
     std::string clipboard;
     std::string screenText;
+    std::string recentNotifications;
 };
 
 class Context {

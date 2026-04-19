@@ -1,5 +1,8 @@
 #include "executor.hpp"
 #include "logger.hpp"
+#include "config.hpp"
+#include "screen.hpp"
+#include "vision.hpp"
 #include <cstdlib>
 #include <sstream>
 #include <fstream>
@@ -202,12 +205,13 @@ std::string Executor::execute(const AgentAction& action) {
     }
     if (action.type == "volume") {
         std::string p = arg(action.args, "action");
+        int step = Config::get().volume_step;
         if (p == "up") {
-            system("wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%+");
+            system(("wpctl set-volume @DEFAULT_AUDIO_SINK@ " + std::to_string(step) + "%+").c_str());
             return "Louder.";
         }
         else if (p == "down") {
-            system("wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%-");
+            system(("wpctl set-volume @DEFAULT_AUDIO_SINK@ " + std::to_string(step) + "%-").c_str());
             return "Quieter.";
         }
         else if (p == "mute") {
@@ -217,12 +221,13 @@ std::string Executor::execute(const AgentAction& action) {
     }
     if (action.type == "brightness") {
         std::string p = arg(action.args, "action");
+        int step = Config::get().brightness_step;
         if (p == "up") {
-            system("brightnessctl set 10%+");
+            system(("brightnessctl set " + std::to_string(step) + "%+").c_str());
             return "Brighter.";
         }
         else {
-            system("brightnessctl set 10%-");
+            system(("brightnessctl set " + std::to_string(step) + "%-").c_str());
             return "Dimmer.";
         }
     }
@@ -402,6 +407,55 @@ std::string Executor::execute(const AgentAction& action) {
         return "__TIMER__";
     }
 
+    // ─── Notifications ───
+    if (action.type == "read_notifications") {
+        std::string out = shellCapture("dunstctl history 2>/dev/null | head -c 600");
+        if (out.empty() || out == "Command completed successfully." || out == "Command failed.")
+            out = shellCapture("makoctl list 2>/dev/null | head -c 600");
+        if (out.empty() || out == "Command completed successfully." || out == "Command failed.")
+            return "No notifications found.";
+        return out;
+    }
+
+    // ─── Music search (Spotify/Youtube) ───
+    if (action.type == "music_search") {
+        std::string query = arg(action.args, "query");
+        if (query.empty()) return "No song specified.";
+
+        // URL-encode query for the browser fallback.
+        std::string encoded;
+        for (char c : query) {
+            if (c == ' ')                            encoded += "%20";
+            else if (std::isalnum(static_cast<unsigned char>(c))) encoded += c;
+            else {
+                char buf[4];
+                std::snprintf(buf, sizeof(buf), "%%%02X", static_cast<unsigned char>(c));
+                encoded += buf;
+            }
+        }
+
+        // If Spotify is running, use its MPRIS OpenUri to trigger a search.
+        std::string check = shellCapture("playerctl -l 2>/dev/null | grep -i spotify");
+        if (!check.empty() && check.find("spotify") != std::string::npos) {
+            std::string uri = "spotify:search:" + query;
+            std::string cmd =
+                "dbus-send --print-reply --dest=org.mpris.MediaPlayer2.spotify "
+                "/org/mpris/MediaPlayer2 org.mpris.MediaPlayer2.Player.OpenUri "
+                "string:" + q(uri) + " 2>/dev/null";
+            system(cmd.c_str());
+            return "Searching Spotify for " + query + ".";
+        }
+
+        // Fallback: open Spotify web search in the default browser.
+        shell("xdg-open " + q("https://open.spotify.com/search/" + encoded));
+        return "Opening Spotify search for " + query + ".";
+    }
+
+    // ─── Fact storage — handled by daemon which owns Memory ───
+    if (action.type == "remember") {
+        return "__REMEMBER__";
+    }
+
     // ─── Phase 2E: Web search ───
     if (action.type == "web_search") {
         std::string query = arg(action.args, "query");
@@ -425,6 +479,44 @@ std::string Executor::execute(const AgentAction& action) {
         if (result.empty() || result == "Command completed successfully.")
             return "No results found. Try opening a browser search.";
         return result;
+    }
+
+    // ─── Phase 10: Vision (VLM + OCR) ───
+    if (action.type == "see_screen") {
+        std::string question = arg(action.args, "question");
+        if (question.empty()) question = "Describe what is visible on the screen.";
+        auto r = Vision::describeScreen(question);
+        if (r.ok) return r.text;
+        // VLM failed (timeout, Ollama down, model swap stall) — degrade to OCR
+        // so the ReAct loop still has *something* textual to reason over
+        // instead of a dead-end error. Screen::capture uses grim+tesseract.
+        Screen::invalidateCache();
+        std::string ocr = Screen::capture("");
+        if (!ocr.empty())
+            return "Vision model unavailable; OCR fallback reads: " + ocr;
+        return r.text;
+    }
+    if (action.type == "describe_region") {
+        int x = argInt(action.args, "x", -1);
+        int y = argInt(action.args, "y", -1);
+        int w = argInt(action.args, "width", -1);
+        int h = argInt(action.args, "height", -1);
+        std::string question = arg(action.args, "question");
+        if (x < 0 || y < 0 || w <= 0 || h <= 0)
+            return "Need x, y, width, and height to look at a region.";
+        if (question.empty()) question = "Describe what is in this region.";
+        auto r = Vision::describeRegion(x, y, w, h, question);
+        if (!r.ok) return r.text;
+        return r.text;
+    }
+    if (action.type == "read_screen_text") {
+        // Bypass the Screen class cache so we always return *current* OCR to
+        // the LLM — the cache is keyed for Context::capture's short-lived
+        // snapshot, not for an explicit "read the screen right now" tool call.
+        Screen::invalidateCache();
+        std::string text = Screen::capture("");
+        if (text.empty()) return "Nothing readable on screen.";
+        return text;
     }
 
     // ─── Phase 2F: System diagnostics ───

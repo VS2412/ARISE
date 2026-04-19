@@ -3,7 +3,10 @@
 #include <deque>
 #include <vector>
 #include <functional>
+#include <chrono>
 #include <nlohmann/json.hpp>
+
+class Memory; // forward decl — avoids pulling sqlite3.h into every TU
 
 struct AgentAction {
     std::string type;
@@ -27,13 +30,17 @@ struct LLMContext {
     std::string tone;          // detected user mood: "", "frustrated", "urgent", "casual", "curious"
     std::string timeOfDay;     // "morning" | "afternoon" | "evening" | "night"
     std::string dateLabel;     // e.g. "Thursday, April 15"
+    std::string notifications; // recent desktop notifications (dunst/mako)
 };
 
 using StreamCallback = std::function<void(const std::string& delta)>;
 
 class LLM {
 public:
-    explicit LLM(const std::string& model = "llama3.1");
+    // Memory pointer is optional — when provided, a fresh LLM (empty in-memory
+    // history) seeds its history from the last few DB turns for cross-session
+    // continuity. Pass nullptr to disable.
+    explicit LLM(const std::string& model = "llama3.1", Memory* memory = nullptr);
 
     // Batch API (backwards compatible — calls streaming with null callback)
     LLMResponse think(const std::string& userText, const LLMContext& ctx = {});
@@ -48,18 +55,31 @@ public:
     // One-shot summarization — no history, no tools. Returns plain text.
     std::string summarize(const std::string& conversationText);
 
+    // Quick GET /api/tags with a short timeout to probe Ollama. Result is
+    // cached for a few seconds to avoid spamming the endpoint when the
+    // caller polls (e.g. before every utterance).
+    bool isAvailable();
+
     void clearHistory();
 
 private:
     std::string model_;
+    Memory*     memory_ = nullptr;
+    bool        historySeeded_ = false;
+
     struct Message { std::string role, content; };
     std::deque<Message> history_;
     static constexpr int MAX_HISTORY = 16;
+
+    // Health check cache
+    std::chrono::steady_clock::time_point lastHealthCheck_{};
+    bool lastHealthResult_ = false;
 
     static size_t writeCallback(void*, size_t, size_t, std::string*);
     std::string   post(const std::string& url, const std::string& body);
     LLMResponse   parse(const std::string& raw);
     std::string   buildSystem(const LLMContext& ctx);
+    void          seedHistoryFromMemory();
 
     // Streaming internals
     struct StreamState {

@@ -9,8 +9,10 @@ find_package(nlohmann_json REQUIRED)
 find_package(SQLite3 REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(FVAD REQUIRED libfvad)
+pkg_check_modules(ONNXRUNTIME REQUIRED libonnxruntime)
 
-set(WHISPER_DIR /home/Aurelius/Documents/AdoVs/whisper.cpp)
+set(WHISPER_DIR "/home/Aurelius/Documents/AdoVs/whisper.cpp"
+    CACHE PATH "Path to whisper.cpp source tree (needs include/ and build/ subdirs)")
 
 add_executable(ai-agent
     src/main.cpp
@@ -26,17 +28,22 @@ add_executable(ai-agent
     src/intent.cpp
     src/screen.cpp
     src/timer.cpp
+    src/config.cpp
+    src/wakeword.cpp
+    src/vision.cpp
 )
 
 target_include_directories(ai-agent PRIVATE
     ${WHISPER_DIR}/include
     ${WHISPER_DIR}/ggml/include
     ${FVAD_INCLUDE_DIRS}
+    ${ONNXRUNTIME_INCLUDE_DIRS}
 )
 
 target_link_directories(ai-agent PRIVATE
     ${WHISPER_DIR}/build/src
     ${WHISPER_DIR}/build/ggml/src
+    ${ONNXRUNTIME_LIBRARY_DIRS}
 )
 
 target_link_libraries(ai-agent PRIVATE
@@ -45,6 +52,7 @@ target_link_libraries(ai-agent PRIVATE
     nlohmann_json::nlohmann_json
     SQLite3::SQLite3
     ${FVAD_LIBRARIES}
+    ${ONNXRUNTIME_LIBRARIES}
 )
 
 target_compile_options(ai-agent PRIVATE -Wall -Wextra -O2 ${FVAD_CFLAGS_OTHER})

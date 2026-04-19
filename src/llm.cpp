@@ -1,5 +1,7 @@
 #include "llm.hpp"
 #include "logger.hpp"
+#include "config.hpp"
+#include "memory.hpp"
 #include <curl/curl.h>
 #include <nlohmann/json.hpp>
 #include <chrono>
@@ -33,6 +35,8 @@ TOOL USE — you MUST call the matching tool whenever the user's request is tool
 - "disk space" / "cpu usage" / "battery" → call system_info
 - "open X" / "launch X" → call open_application
 - "run X" / "execute X" → call run_command
+- "what's on my screen" / "what does this error say" / "look at my screen" / visual questions → call see_screen
+- "read the text on my screen" / pure text extraction → call read_screen_text
 - Ambiguous request where acting blindly could cause harm → call ask_user with a one-sentence clarifying question
 
 For greetings, opinions, small talk — just speak, no tool.
@@ -446,13 +450,74 @@ static json buildTools() {
             {"type","function"},
             {"function",{
                 {"name","recall_memory"},
-                {"description","Search your own long-term memory for past conversations. Use when user references something from before: 'remember when', 'what did I say about', 'have we talked about X'."},
+                {"description","Semantic + keyword search across your long-term memory. Finds related past conversations even when phrased differently. Use when the user references something from before: 'remember when', 'what did I say about', 'have we talked about X', 'that thing we discussed'."},
                 {"parameters",{
                     {"type","object"},
                     {"properties",{
                         {"query",{{"type","string"},{"description","Keywords to search for"}}}
                     }},
                     {"required",{"query"}}
+                }}
+            }}
+        },
+        // --- Vision (Phase 10) ---
+        {
+            {"type","function"},
+            {"function",{
+                {"name","see_screen"},
+                {"description","Look at the user's screen and answer a question about it. Uses a vision-language model (captures a screenshot first). Use when the user asks what's on their screen, what an error says, what a UI shows, or for visual debugging. Prefer this over read_screen_text when the question is about layout, images, or visuals."},
+                {"parameters",{
+                    {"type","object"},
+                    {"properties",{
+                        {"question",{{"type","string"},{"description","What to look for or answer about the screen"}}}
+                    }},
+                    {"required",{"question"}}
+                }}
+            }}
+        },
+        {
+            {"type","function"},
+            {"function",{
+                {"name","describe_region"},
+                {"description","Look at a specific rectangular region of the screen and answer a question about it. Faster and more focused than see_screen."},
+                {"parameters",{
+                    {"type","object"},
+                    {"properties",{
+                        {"x",{{"type","integer"},{"description","Region top-left X in pixels"}}},
+                        {"y",{{"type","integer"},{"description","Region top-left Y in pixels"}}},
+                        {"width",{{"type","integer"},{"description","Region width in pixels"}}},
+                        {"height",{{"type","integer"},{"description","Region height in pixels"}}},
+                        {"question",{{"type","string"},{"description","What to look for in this region"}}}
+                    }},
+                    {"required",{"x","y","width","height","question"}}
+                }}
+            }}
+        },
+        {
+            {"type","function"},
+            {"function",{
+                {"name","read_screen_text"},
+                {"description","OCR the current screen and return the raw text. Cheaper than see_screen — use for pure text extraction when a visual model would be overkill."},
+                {"parameters",{
+                    {"type","object"},
+                    {"properties",json::object()},
+                    {"required",json::array()}
+                }}
+            }}
+        },
+        // --- Fact storage ---
+        {
+            {"type","function"},
+            {"function",{
+                {"name","remember_fact"},
+                {"description","Store a fact about the user for future reference. Use when they share preferences, locations, schedules, or personal details that should persist."},
+                {"parameters",{
+                    {"type","object"},
+                    {"properties",{
+                        {"key",{{"type","string"},{"description","Short identifier like 'favorite_color' or 'work_hours'"}}},
+                        {"value",{{"type","string"},{"description","The fact to remember"}}}
+                    }},
+                    {"required",{"key","value"}}
                 }}
             }}
         }
@@ -491,7 +556,11 @@ static AgentAction toolToAction(const std::string& name, const json& args) {
     if (name == "web_search")       return {"web_search",  args};
     if (name == "system_info")      return {"sysinfo",     args};
     if (name == "recall_memory")    return {"recall_memory", args};
+    if (name == "remember_fact")    return {"remember",      args};
     if (name == "ask_user")         return {"ask",           args};
+    if (name == "see_screen")       return {"see_screen",       args};
+    if (name == "describe_region")  return {"describe_region",  args};
+    if (name == "read_screen_text") return {"read_screen_text", args};
     return {};
 }
 
@@ -502,9 +571,59 @@ size_t LLM::writeCallback(void* ptr, size_t sz, size_t nmemb, std::string* out) 
     return sz * nmemb;
 }
 
-LLM::LLM(const std::string& model) : model_(model) {}
+LLM::LLM(const std::string& model, Memory* memory)
+    : model_(model), memory_(memory) {}
 
-void LLM::clearHistory() { history_.clear(); }
+void LLM::clearHistory() { history_.clear(); historySeeded_ = false; }
+
+// Seed the in-memory rolling history from the SQLite conversation log.
+// Runs once per process so a fresh daemon inherits the last few turns of
+// context — lets the user say "continue that thought" after a restart.
+void LLM::seedHistoryFromMemory() {
+    if (historySeeded_ || !memory_) return;
+    historySeeded_ = true;
+    auto recent = memory_->getRecent(4);
+    for (const auto& e : recent) {
+        // Skip action-log lines (they start with "type:" and contain JSON)
+        // so the LLM gets clean conversational turns, not executor noise.
+        if (e.content.find(':') != std::string::npos &&
+            (e.content.find("{") != std::string::npos ||
+             e.content.rfind("task_done:", 0) == 0))
+            continue;
+        std::string role = (e.role == "user") ? "user" : "assistant";
+        history_.push_back({role, e.content});
+    }
+    if (!history_.empty())
+        Logger::info("LLM: seeded history with " + std::to_string(history_.size()) +
+                     " entries from memory");
+}
+
+// Probe Ollama with GET /api/tags. Result cached for 5s to avoid repeated
+// blocking calls when multiple utterances land in quick succession.
+bool LLM::isAvailable() {
+    auto now = std::chrono::steady_clock::now();
+    auto age = std::chrono::duration_cast<std::chrono::seconds>(
+                   now - lastHealthCheck_).count();
+    if (age < 5 && lastHealthCheck_.time_since_epoch().count() != 0)
+        return lastHealthResult_;
+
+    CURL* curl = curl_easy_init();
+    if (!curl) { lastHealthResult_ = false; lastHealthCheck_ = now; return false; }
+
+    std::string response;
+    std::string url = Config::get().ollama_url + "/api/tags";
+    curl_easy_setopt(curl, CURLOPT_URL,           url.c_str());
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, writeCallback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA,     &response);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT,       2L);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 1L);
+    CURLcode rc = curl_easy_perform(curl);
+    curl_easy_cleanup(curl);
+
+    lastHealthResult_ = (rc == CURLE_OK && !response.empty());
+    lastHealthCheck_ = now;
+    return lastHealthResult_;
+}
 
 std::string LLM::buildSystem(const LLMContext& ctx) {
     std::ostringstream s;
@@ -523,6 +642,8 @@ std::string LLM::buildSystem(const LLMContext& ctx) {
         s << "\n" << ctx.memorySummary;
     if (!ctx.screenText.empty())
         s << "\nScreen content (OCR):\n" << ctx.screenText;
+    if (!ctx.notifications.empty())
+        s << "\nRecent notifications:\n" << ctx.notifications;
     if (!ctx.tone.empty()) {
         s << "\nUser tone: " << ctx.tone << ".";
         if (ctx.tone == "frustrated")
@@ -545,7 +666,7 @@ std::string LLM::post(const std::string& url, const std::string& body) {
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER,    headers);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, writeCallback);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA,     &response);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT,       60L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT,       (long)Config::get().llm_timeout_sec);
     CURLcode rc = curl_easy_perform(curl);
     if (rc != CURLE_OK)
         Logger::error("LLM: " + std::string(curl_easy_strerror(rc)));
@@ -798,7 +919,7 @@ LLMResponse LLM::postStreaming(const std::string& url, const std::string& body,
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER,    headers);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, streamWriteCallback);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA,     &state);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT,       90L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT,       (long)(Config::get().llm_timeout_sec + 30));
 
     auto t0 = std::chrono::steady_clock::now();
     CURLcode rc = curl_easy_perform(curl);
@@ -883,7 +1004,8 @@ LLMResponse LLM::chatStreaming(const json& messages, const LLMContext& ctx,
     body["tools"]    = buildTools();
     body["think"]    = false;
 
-    return postStreaming("http://localhost:11434/api/chat", body.dump(), onDelta);
+    std::string url = Config::get().ollama_url + "/api/chat";
+    return postStreaming(url, body.dump(), onDelta);
 }
 
 void LLM::updateHistory(const std::string& userText, const LLMResponse& result,
@@ -912,6 +1034,10 @@ void LLM::updateHistory(const std::string& userText, const LLMResponse& result,
 LLMResponse LLM::thinkStreaming(const std::string& userText, const LLMContext& ctx,
                                  StreamCallback onDelta) {
     Logger::info("LLM: prompt → " + userText);
+
+    // One-time seed from DB so a fresh process inherits prior conversation context.
+    if (!historySeeded_ && history_.empty())
+        seedHistoryFromMemory();
 
     json messages = json::array();
     for (const auto& m : history_)
@@ -969,7 +1095,7 @@ std::string LLM::summarize(const std::string& conversationText) {
     });
 
     auto t0 = std::chrono::steady_clock::now();
-    auto raw = post("http://localhost:11434/api/chat", body.dump());
+    auto raw = post(Config::get().ollama_url + "/api/chat", body.dump());
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                   std::chrono::steady_clock::now() - t0).count();
 

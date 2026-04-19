@@ -58,6 +58,17 @@ SystemContext Context::capture() {
         return exec("wl-paste --no-newline 2>/dev/null | head -c 120");
     });
 
+    // Pull recent notifications from whichever notification daemon responds.
+    // dunstctl and makoctl are mutually exclusive in practice — the first
+    // non-empty result wins. Budget ~300 chars so LLM context stays tight.
+    auto notifF = std::async(std::launch::async, []() -> std::string {
+        std::string out = exec("dunstctl history 2>/dev/null "
+                               "| head -c 300");
+        if (!out.empty()) return out;
+        out = exec("makoctl list 2>/dev/null | head -c 300");
+        return out;
+    });
+
     auto [app, win] = niriF.get();
     ctx.activeApp    = app;
     ctx.activeWindow = win;
@@ -73,8 +84,9 @@ SystemContext Context::capture() {
         });
     }
 
-    ctx.clipboard  = clipF.get();
-    ctx.screenText = ocrSkipped ? std::string{} : screenF.get();
+    ctx.clipboard           = clipF.get();
+    ctx.recentNotifications = notifF.get();
+    ctx.screenText          = ocrSkipped ? std::string{} : screenF.get();
 
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                   std::chrono::steady_clock::now() - t0).count();

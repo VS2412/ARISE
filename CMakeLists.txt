@@ -31,6 +31,7 @@ add_executable(ai-agent
     src/config.cpp
     src/wakeword.cpp
     src/vision.cpp
+    src/planner.cpp
 )
 
 target_include_directories(ai-agent PRIVATE

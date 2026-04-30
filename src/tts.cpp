@@ -5,8 +5,91 @@
 #include <cctype>
 #include <filesystem>
 #include <csignal>
+#include <regex>
 #include <unistd.h>
 #include <sys/wait.h>
+
+// Make text safe for Piper to speak. Piper voices punctuation literally —
+// "tilde slash", "asterisk dot pdf", "backslash open paren" — which destroys
+// the user's ear. So we run shell/JSON noise through a pipeline of
+// substitutions:
+//   - JSON braces/brackets/quotes around args  → drop
+//   - long absolute paths                       → basename only
+//   - "~/foo/bar/baz.pdf"                       → "baz.pdf"
+//   - shell glob/escape jank ("*.pdf", "\(", "{}") → human words or drop
+//   - long blobs of code (>200 chars, no spaces) → "[output omitted]"
+// This runs at every speak entry so no caller can leak raw shell output.
+static std::string sanitizeForSpeech(const std::string& in) {
+    if (in.empty()) return in;
+    std::string s = in;
+
+    // Strip JSON wrappers — {"command":"..."} → ...
+    s = std::regex_replace(s, std::regex(R"(\{\s*\"[a-zA-Z_]+\"\s*:\s*\")"), " ");
+    s = std::regex_replace(s, std::regex(R"(\"\s*\})"), " ");
+    s = std::regex_replace(s, std::regex(R"(\"\s*,\s*\"[a-zA-Z_]+\"\s*:\s*\")"), " and ");
+
+    // Long absolute path → basename only. Walk the string and replace any
+    // "/a/b/c.ext" (≥2 slashes) with just "c.ext" so Piper says "report.pdf"
+    // not "slash home slash Aurelius slash Downloads slash report.pdf".
+    {
+        std::string out;
+        out.reserve(s.size());
+        size_t i = 0;
+        while (i < s.size()) {
+            if (s[i] == '~' || (s[i] == '/' && (i == 0 || !std::isalnum(static_cast<unsigned char>(s[i-1]))))) {
+                size_t start = i;
+                size_t slashes = 0;
+                size_t j = i;
+                while (j < s.size() &&
+                       (std::isalnum(static_cast<unsigned char>(s[j])) ||
+                        s[j] == '/' || s[j] == '_' || s[j] == '-' || s[j] == '.' || s[j] == '~')) {
+                    if (s[j] == '/') ++slashes;
+                    ++j;
+                }
+                if (slashes >= 2 && j - start > 6) {
+                    // Take basename
+                    size_t lastSlash = s.rfind('/', j - 1);
+                    if (lastSlash != std::string::npos && lastSlash + 1 < j) {
+                        out += s.substr(lastSlash + 1, j - lastSlash - 1);
+                    }
+                    i = j;
+                    continue;
+                }
+            }
+            out += s[i++];
+        }
+        s = out;
+    }
+
+    // Common shell tokens → drop / replace
+    s = std::regex_replace(s, std::regex(R"(\\\()"), "");
+    s = std::regex_replace(s, std::regex(R"(\\\))"), "");
+    s = std::regex_replace(s, std::regex(R"(-(maxdepth|iname|exec|type|name)\s+)"), " ");
+    s = std::regex_replace(s, std::regex(R"(\{\}\s*\+)"), "");
+    s = std::regex_replace(s, std::regex(R"(\*\.([a-zA-Z0-9]+))"), "$1 files");
+    s = std::regex_replace(s, std::regex(R"(\b-rf?\b)"), "");
+    s = std::regex_replace(s, std::regex(R"([`'\"\[\]{}|<>])"), " ");
+    s = std::regex_replace(s, std::regex(R"(\bmv -t\b)"), "move into");
+    s = std::regex_replace(s, std::regex(R"(\bmkdir -p\b)"), "create folders");
+    s = std::regex_replace(s, std::regex(R"(\bfind\b)"), "find ");
+
+    // Collapse whitespace
+    s = std::regex_replace(s, std::regex(R"(\s+)"), " ");
+    auto trimL = s.find_first_not_of(' ');
+    if (trimL == std::string::npos) return "";
+    s = s.substr(trimL);
+    auto trimR = s.find_last_not_of(' ');
+    s = s.substr(0, trimR + 1);
+
+    // If after sanitizing we still have a giant code-blob with few spaces,
+    // bail out — better silence than gibberish.
+    if (s.size() > 200) {
+        size_t spaces = std::count(s.begin(), s.end(), ' ');
+        if (spaces < s.size() / 12) return "[output omitted]";
+    }
+
+    return s;
+}
 
 // Strip UTF-8 sequences of 3+ bytes (covers all emoji planes, dingbats,
 // smart quotes/dashes that Piper mispronounces). Keeps ASCII + 2-byte
@@ -69,8 +152,10 @@ void TTS::speakSentence(const std::string& text) {
     if (text.empty() || !available_) return;
 
     // Belt-and-suspenders: strip emoji/3+ byte UTF-8 for any path that
-    // bypasses feedChunk (batch speak, timer announcements, etc.).
-    std::string clean = stripHighUnicode(text);
+    // bypasses feedChunk (batch speak, timer announcements, etc.), then
+    // sanitize for shell/JSON noise so Piper never voices "tilde slash" or
+    // raw command-line escape sequences.
+    std::string clean = sanitizeForSpeech(stripHighUnicode(text));
     auto s = clean.find_first_not_of(" \t\n\r");
     auto e = clean.find_last_not_of(" \t\n\r");
     if (s == std::string::npos) return;

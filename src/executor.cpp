@@ -532,8 +532,19 @@ std::string Executor::execute(const AgentAction& action) {
             result += "CPU:\n" + shellCapture("top -bn1 | head -5") + "\n";
         if (cat == "battery" || cat == "all") {
             std::string bat = shellCapture("cat /sys/class/power_supply/BAT*/capacity 2>/dev/null");
-            if (bat.find("No such file") == std::string::npos && !bat.empty())
-                result += "BATTERY: " + bat + "%\n";
+            // Strip trailing newline / whitespace from the cat output so TTS
+            // reads "Battery is at 61 percent." not "BATTERY: 61 \n%".
+            while (!bat.empty() && (bat.back() == '\n' || bat.back() == '\r' ||
+                                    bat.back() == ' ' || bat.back() == '\t'))
+                bat.pop_back();
+            if (bat.find("No such file") == std::string::npos &&
+                bat.find("Command failed") == std::string::npos &&
+                !bat.empty()) {
+                if (cat == "battery")
+                    result = "Battery is at " + bat + " percent.";
+                else
+                    result += "Battery is at " + bat + " percent.\n";
+            }
         }
         if (cat == "network" || cat == "all")
             result += "NETWORK:\n" + shellCapture("ip -br addr 2>/dev/null | head -5") + "\n";

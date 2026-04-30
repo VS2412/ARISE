@@ -43,6 +43,17 @@ For greetings, opinions, small talk — just speak, no tool.
 For context questions (what app, clipboard, screen) — read from SYSTEM STATE below.
 For multi-step requests ("open X and check Y") — emit multiple tool calls in one response.
 
+NEVER call a tool when the user is just acknowledging, agreeing, venting, or making small talk. Specifically — NO tool call, just speak — for these patterns:
+- "ok" / "okay" / "cool" / "nice" / "sweet" / "got it" / "alright" → "Got it."
+- "thanks" / "thank you" / "appreciate it" → "Anytime."
+- "you're ready to go" / "ready to go" / "you ready" → "Ready when you are." (do NOT call system_info)
+- "running smooth" / "all good" / "no problem" → "Glad to hear it."
+- "listen to me" / "stop" / "wait" / "hold on" / "hey" alone → acknowledge, NEVER run a tool
+- Profanity directed at you ("damn it", "what the hell") → calm acknowledgement, NO tool
+- Pure curiosity about you ("how are you", "what's up") → identity reply, NO tool
+
+Only call a tool when the user describes an action they want done or asks for data you can retrieve. When in doubt: speak, don't tool.
+
 When command output comes back, summarize the data directly: "16 gigs free on root, 77 on home." Never say "The observation shows" or narrate what you see.
 
 Arch Linux. pacman only. No apt.)";
@@ -505,6 +516,21 @@ static json buildTools() {
                 }}
             }}
         },
+        // --- Planner (Phase 11) ---
+        {
+            {"type","function"},
+            {"function",{
+                {"name","start_plan"},
+                {"description","Hand off a genuinely multi-step goal to the agentic planner. Use ONLY when the request needs 3+ distinct tool calls, conditional logic, or sequential file/shell operations (e.g. 'reorganize my Downloads folder', 'find the rust file I was editing and fix the compile error'). For simple one- or two-tool requests, call the tools directly instead."},
+                {"parameters",{
+                    {"type","object"},
+                    {"properties",{
+                        {"goal",{{"type","string"},{"description","A concise restatement of the user's goal in a single sentence."}}}
+                    }},
+                    {"required",{"goal"}}
+                }}
+            }}
+        },
         // --- Fact storage ---
         {
             {"type","function"},
@@ -561,6 +587,7 @@ static AgentAction toolToAction(const std::string& name, const json& args) {
     if (name == "see_screen")       return {"see_screen",       args};
     if (name == "describe_region")  return {"describe_region",  args};
     if (name == "read_screen_text") return {"read_screen_text", args};
+    if (name == "start_plan")       return {"plan",             args};
     return {};
 }
 
@@ -584,14 +611,18 @@ void LLM::seedHistoryFromMemory() {
     historySeeded_ = true;
     auto recent = memory_->getRecent(4);
     for (const auto& e : recent) {
-        // Skip action-log lines (they start with "type:" and contain JSON)
-        // so the LLM gets clean conversational turns, not executor noise.
+        // Skip executor-noise rows the daemon writes to the conversations
+        // table: `type:{json}` action logs and `task_done:` summaries.
         if (e.content.find(':') != std::string::npos &&
             (e.content.find("{") != std::string::npos ||
              e.content.rfind("task_done:", 0) == 0))
             continue;
+        // Skip legacy "(called tool X)" rows written before the Option-C fix —
+        // feeding them back teaches the model to literally speak the phrase.
+        if (e.content.find("(called tool ") != std::string::npos)
+            continue;
         std::string role = (e.role == "user") ? "user" : "assistant";
-        history_.push_back({role, e.content});
+        history_.push_back({role, e.content, {}});
     }
     if (!history_.empty())
         Logger::info("LLM: seeded history with " + std::to_string(history_.size()) +
@@ -700,6 +731,8 @@ LLMResponse LLM::parse(const std::string& raw) {
         // TOOL CALL path — iterate ALL tool calls
         if (msg.contains("tool_calls") && msg["tool_calls"].is_array()
             && !msg["tool_calls"].empty()) {
+
+            result.rawToolCalls = msg["tool_calls"];  // keep verbatim for history
 
             for (auto& tc : msg["tool_calls"]) {
                 if (!tc.contains("function")) continue;
@@ -954,6 +987,7 @@ LLMResponse LLM::postStreaming(const std::string& url, const std::string& body,
         auto& msg = state.finalMsg["message"];
         if (msg.contains("tool_calls") && msg["tool_calls"].is_array()
             && !msg["tool_calls"].empty()) {
+            result.rawToolCalls = msg["tool_calls"];  // keep verbatim for history
             for (auto& tc : msg["tool_calls"]) {
                 if (!tc.contains("function")) continue;
                 auto& call = tc["function"];
@@ -1010,19 +1044,21 @@ LLMResponse LLM::chatStreaming(const json& messages, const LLMContext& ctx,
 
 void LLM::updateHistory(const std::string& userText, const LLMResponse& result,
                          const std::string& userRole) {
-    history_.push_back({userRole, userText});
+    history_.push_back({userRole, userText, {}});
 
-    if (result.hasAction()) {
-        std::string actionLog;
-        for (auto& a : result.actions) {
-            if (!actionLog.empty()) actionLog += "; ";
-            actionLog += "(called tool " + a.type + ")";
-        }
-        if (!result.speech.empty())
-            actionLog = result.speech + " " + actionLog;
-        history_.push_back({"assistant", actionLog});
-    } else if (!result.speech.empty()) {
-        history_.push_back({"assistant", result.speech});
+    // Option C: store tool_calls natively — content carries only what the user
+    // heard (speech), the native tool_calls array carries the function-call
+    // intent. Earlier versions synthesized "(called tool X)" prose here, which
+    // the model would then parrot back as literal TTS on the next turn. That
+    // bug cost us the 2026-04-21 timer regression.
+    if (result.hasAction() || !result.speech.empty()) {
+        Message m;
+        m.role    = "assistant";
+        m.content = result.speech;      // may be empty when the model only called a tool
+        if (result.hasAction() && result.rawToolCalls.is_array()
+            && !result.rawToolCalls.empty())
+            m.toolCalls = result.rawToolCalls;
+        history_.push_back(std::move(m));
     }
 
     while (static_cast<int>(history_.size()) > MAX_HISTORY)
@@ -1030,6 +1066,20 @@ void LLM::updateHistory(const std::string& userText, const LLMResponse& result,
 }
 
 // ─── Public streaming API ───
+
+// Serialize the rolling in-memory history into Ollama's chat format. Assistant
+// turns that invoked tools carry their native tool_calls array so the model
+// sees its own prior function calls (Option C) rather than a prose summary.
+json LLM::serializeHistory() const {
+    json messages = json::array();
+    for (const auto& m : history_) {
+        json msg = {{"role", m.role}, {"content", m.content}};
+        if (m.role == "assistant" && m.toolCalls.is_array() && !m.toolCalls.empty())
+            msg["tool_calls"] = m.toolCalls;
+        messages.push_back(std::move(msg));
+    }
+    return messages;
+}
 
 LLMResponse LLM::thinkStreaming(const std::string& userText, const LLMContext& ctx,
                                  StreamCallback onDelta) {
@@ -1039,9 +1089,7 @@ LLMResponse LLM::thinkStreaming(const std::string& userText, const LLMContext& c
     if (!historySeeded_ && history_.empty())
         seedHistoryFromMemory();
 
-    json messages = json::array();
-    for (const auto& m : history_)
-        messages.push_back({{"role", m.role}, {"content", m.content}});
+    json messages = serializeHistory();
     messages.push_back({{"role", "user"}, {"content", userText}});
 
     auto result = chatStreaming(messages, ctx, onDelta);
@@ -1053,9 +1101,7 @@ LLMResponse LLM::reactStreaming(const std::string& observation, const LLMContext
                                  StreamCallback onDelta) {
     Logger::info("LLM: react observation → " + observation);
 
-    json messages = json::array();
-    for (const auto& m : history_)
-        messages.push_back({{"role", m.role}, {"content", m.content}});
+    json messages = serializeHistory();
 
     std::string reactPrompt =
         "Result: " + observation +
@@ -1075,6 +1121,49 @@ LLMResponse LLM::think(const std::string& userText, const LLMContext& ctx) {
 
 LLMResponse LLM::react(const std::string& observation, const LLMContext& ctx) {
     return reactStreaming(observation, ctx, nullptr);
+}
+
+// Phase 11: structured-JSON one-shot. Used by the Planner for plan creation
+// and reflection — both want deterministic JSON, not free-form speech.
+nlohmann::json LLM::generateJson(const std::string& systemPrompt,
+                                   const std::string& userPrompt) {
+    json body;
+    body["model"]  = model_;
+    body["stream"] = false;
+    body["think"]  = false;
+    body["format"] = "json";
+    body["messages"] = json::array({
+        {{"role","system"}, {"content", systemPrompt}},
+        {{"role","user"},   {"content", userPrompt}}
+    });
+    // Keep planning deterministic-ish; still allow some flexibility for creative
+    // multi-step plans.
+    body["options"] = {{"temperature", 0.2}};
+
+    auto t0  = std::chrono::steady_clock::now();
+    auto raw = post(Config::get().ollama_url + "/api/chat", body.dump());
+    auto ms  = std::chrono::duration_cast<std::chrono::milliseconds>(
+                   std::chrono::steady_clock::now() - t0).count();
+
+    if (raw.empty()) return json::object();
+    try {
+        auto outer = json::parse(raw);
+        if (!outer.contains("message")) return json::object();
+        auto& msg = outer["message"];
+        if (!msg.contains("content") || msg["content"].is_null()) return json::object();
+        std::string text = stripThinkTags(msg["content"].get<std::string>());
+        auto s = text.find_first_not_of(" \t\n\r");
+        auto e = text.find_last_not_of(" \t\n\r");
+        if (s == std::string::npos) return json::object();
+        text = text.substr(s, e - s + 1);
+        auto result = json::parse(text);
+        Logger::info("LLM: generateJson in " + std::to_string(ms) + "ms ("
+                     + std::to_string(text.size()) + "b)");
+        return result;
+    } catch (const std::exception& ex) {
+        Logger::error("LLM: generateJson parse error: " + std::string(ex.what()));
+        return json::object();
+    }
 }
 
 // One-shot summarization. No history, no tools, no streaming.

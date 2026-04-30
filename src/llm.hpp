@@ -17,6 +17,9 @@ struct AgentAction {
 struct LLMResponse {
     std::string speech;
     std::vector<AgentAction> actions;
+    nlohmann::json rawToolCalls;   // Ollama's native tool_calls array, re-sent
+                                   // verbatim in history so the model sees its
+                                   // own prior calls instead of a prose echo.
     bool done = false;
     bool hasAction() const { return !actions.empty(); }
 };
@@ -55,6 +58,13 @@ public:
     // One-shot summarization — no history, no tools. Returns plain text.
     std::string summarize(const std::string& conversationText);
 
+    // Phase 11: one-shot structured JSON generation. No history, no tools,
+    // `format=json` sent to Ollama so the model is forced to return valid
+    // JSON. Returns json::object() on failure (empty object ≠ error, the
+    // caller should check for expected keys).
+    nlohmann::json generateJson(const std::string& systemPrompt,
+                                 const std::string& userPrompt);
+
     // Quick GET /api/tags with a short timeout to probe Ollama. Result is
     // cached for a few seconds to avoid spamming the endpoint when the
     // caller polls (e.g. before every utterance).
@@ -67,7 +77,13 @@ private:
     Memory*     memory_ = nullptr;
     bool        historySeeded_ = false;
 
-    struct Message { std::string role, content; };
+    struct Message {
+        std::string role;
+        std::string content;
+        nlohmann::json toolCalls;  // for assistant turns that invoked tools —
+                                   // mirrored from LLMResponse::rawToolCalls
+                                   // so the model sees its own call history.
+    };
     std::deque<Message> history_;
     static constexpr int MAX_HISTORY = 16;
 
@@ -80,6 +96,7 @@ private:
     LLMResponse   parse(const std::string& raw);
     std::string   buildSystem(const LLMContext& ctx);
     void          seedHistoryFromMemory();
+    nlohmann::json serializeHistory() const;
 
     // Streaming internals
     struct StreamState {

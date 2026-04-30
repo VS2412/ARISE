@@ -78,6 +78,14 @@ Memory::Memory(const std::string& dbPath) {
             turn_start INTEGER,
             turn_end   INTEGER
         );
+        CREATE TABLE IF NOT EXISTS plans (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            goal       TEXT NOT NULL,
+            steps_json TEXT NOT NULL,
+            outcome    TEXT,
+            created_at TEXT DEFAULT (datetime('now','localtime'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_plans_goal ON plans(goal);
     )");
 
     // FTS5 virtual table synced with conversations
@@ -781,4 +789,94 @@ std::string Memory::getSummary() const {
     // to mimic its own older bad output. Facts + summaries are enough.
 
     return out.str();
+}
+
+// ─── Phase 11: agentic plans ───
+
+int Memory::savePlan(const std::string& goal, const std::string& stepsJson,
+                      const std::string& outcome) {
+    if (!db_) return 0;
+    std::lock_guard<std::mutex> lk(dbMutex_);
+    sqlite3_stmt* stmt;
+    const char* q = "INSERT INTO plans (goal, steps_json, outcome) VALUES (?, ?, ?)";
+    if (sqlite3_prepare_v2(db_, q, -1, &stmt, nullptr) != SQLITE_OK) {
+        Logger::error("Memory: savePlan prepare failed");
+        return 0;
+    }
+    sqlite3_bind_text(stmt, 1, goal.c_str(),      -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, stepsJson.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 3, outcome.c_str(),   -1, SQLITE_TRANSIENT);
+    int id = 0;
+    if (sqlite3_step(stmt) == SQLITE_DONE)
+        id = static_cast<int>(sqlite3_last_insert_rowid(db_));
+    sqlite3_finalize(stmt);
+    return id;
+}
+
+void Memory::updatePlanOutcome(int planId, const std::string& outcome,
+                                const std::string& stepsJson) {
+    if (!db_ || planId <= 0) return;
+    std::lock_guard<std::mutex> lk(dbMutex_);
+    sqlite3_stmt* stmt;
+    const char* q = stepsJson.empty()
+        ? "UPDATE plans SET outcome = ? WHERE id = ?"
+        : "UPDATE plans SET outcome = ?, steps_json = ? WHERE id = ?";
+    if (sqlite3_prepare_v2(db_, q, -1, &stmt, nullptr) != SQLITE_OK) return;
+    sqlite3_bind_text(stmt, 1, outcome.c_str(), -1, SQLITE_TRANSIENT);
+    if (stepsJson.empty()) {
+        sqlite3_bind_int(stmt, 2, planId);
+    } else {
+        sqlite3_bind_text(stmt, 2, stepsJson.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int(stmt, 3, planId);
+    }
+    sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+}
+
+std::vector<PlanRow> Memory::recentPlans(int n) const {
+    std::vector<PlanRow> out;
+    if (!db_) return out;
+    std::lock_guard<std::mutex> lk(dbMutex_);
+    sqlite3_stmt* stmt;
+    const char* q = "SELECT id, goal, steps_json, outcome, created_at "
+                    "FROM plans ORDER BY id DESC LIMIT ?";
+    if (sqlite3_prepare_v2(db_, q, -1, &stmt, nullptr) != SQLITE_OK) return out;
+    sqlite3_bind_int(stmt, 1, n);
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        PlanRow p;
+        p.id        = sqlite3_column_int(stmt, 0);
+        p.goal      = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+        p.stepsJson = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
+        if (sqlite3_column_type(stmt, 3) != SQLITE_NULL)
+            p.outcome = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
+        p.createdAt = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 4));
+        out.push_back(std::move(p));
+    }
+    sqlite3_finalize(stmt);
+    return out;
+}
+
+std::vector<PlanRow> Memory::findPlansByGoal(const std::string& goalLike, int n) const {
+    std::vector<PlanRow> out;
+    if (!db_ || goalLike.empty()) return out;
+    std::lock_guard<std::mutex> lk(dbMutex_);
+    sqlite3_stmt* stmt;
+    const char* q = "SELECT id, goal, steps_json, outcome, created_at "
+                    "FROM plans WHERE goal LIKE ? ORDER BY id DESC LIMIT ?";
+    if (sqlite3_prepare_v2(db_, q, -1, &stmt, nullptr) != SQLITE_OK) return out;
+    std::string pattern = "%" + goalLike + "%";
+    sqlite3_bind_text(stmt, 1, pattern.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int (stmt, 2, n);
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        PlanRow p;
+        p.id        = sqlite3_column_int(stmt, 0);
+        p.goal      = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+        p.stepsJson = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
+        if (sqlite3_column_type(stmt, 3) != SQLITE_NULL)
+            p.outcome = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
+        p.createdAt = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 4));
+        out.push_back(std::move(p));
+    }
+    sqlite3_finalize(stmt);
+    return out;
 }

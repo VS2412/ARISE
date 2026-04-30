@@ -12,6 +12,7 @@
 #include "memory.hpp"
 #include "timer.hpp"
 #include "vision.hpp"
+#include "planner.hpp"
 #include <thread>
 #include <chrono>
 #include <mutex>
@@ -40,11 +41,48 @@ static std::string lower(std::string s) {
 
 static bool isInterruptCommand(const std::string& text) {
     auto t = lower(text);
-    return t.find("stop")     != std::string::npos ||
-           t.find("cancel")   != std::string::npos ||
-           t.find("shut up")  != std::string::npos ||
-           t.find("quiet")    != std::string::npos ||
-           t.find("enough")   != std::string::npos;
+    // Anything that should kill ARIA's current speech / task immediately.
+    // Kept generous on purpose — false positives just stop TTS, which the
+    // user can recover from by saying their request again.
+    return t.find("stop")        != std::string::npos ||
+           t.find("cancel")      != std::string::npos ||
+           t.find("shut up")     != std::string::npos ||
+           t.find("quiet")       != std::string::npos ||
+           t.find("enough")      != std::string::npos ||
+           t.find("wait")        != std::string::npos ||
+           t.find("hold on")     != std::string::npos ||
+           t.find("never mind")  != std::string::npos ||
+           t.find("nevermind")   != std::string::npos ||
+           t.find("forget it")   != std::string::npos ||
+           t.find("abort")       != std::string::npos ||
+           t.find("listen to me") != std::string::npos;
+}
+
+// Conversational small-talk that should NEVER trigger a tool call. ARIA's
+// LLM was hallucinating tool calls on phrases like "you're ready to go!"
+// (calling system_info) and "running smooth" (calling sysinfo). When the
+// utterance fits one of these patterns, short-circuit before the LLM and
+// reply with a stock acknowledgement.
+static const char* matchSmallTalk(const std::string& text) {
+    auto t = lower(text);
+    auto trimmed = t;
+    while (!trimmed.empty() && (trimmed.back()  == '.' || trimmed.back()  == '!' ||
+                                trimmed.back()  == '?' || trimmed.back()  == ' ' ||
+                                trimmed.back()  == ',' || trimmed.back()  == '\n')) trimmed.pop_back();
+    while (!trimmed.empty() && trimmed.front() == ' ') trimmed.erase(trimmed.begin());
+
+    static const std::pair<std::regex, const char*> kSmallTalk[] = {
+        { std::regex(R"(^(ok(ay)?|kk|cool|nice|sweet|got it|gotcha|sounds? good|alright|all right)$)", std::regex::icase), "Got it." },
+        { std::regex(R"(^(thanks|thank you|thx|ty|appreciate it|much appreciated)$)", std::regex::icase), "Anytime." },
+        { std::regex(R"(^(you'?re ready( to go)?|you ready|ready to go|are you ready)$)", std::regex::icase), "Ready when you are." },
+        { std::regex(R"(^(running smooth|all good|no problem|np)$)", std::regex::icase), "Glad to hear it." },
+        { std::regex(R"(^(good (morning|afternoon|evening|night)|morning|evening)$)", std::regex::icase), "Morning." },
+        { std::regex(R"(^(bye|goodbye|see you|cya|talk later)$)", std::regex::icase), "Later." },
+    };
+    for (auto& [re, reply] : kSmallTalk) {
+        if (std::regex_match(trimmed, re)) return reply;
+    }
+    return nullptr;
 }
 
 // Wake-word detection. Whisper often mis-hears "aria" as "area", "ariah",
@@ -266,6 +304,131 @@ std::string Daemon::executeAction(const AgentAction& act) {
     return executor_->execute(act);
 }
 
+// ─── Phase 11: planner glue ───
+
+// Pop the next transcribed speech segment off the shared queue, with a
+// bounded wait. Used by the confirmation gate. Returns the transcribed text
+// (possibly empty on VAD noise) or "" on timeout.
+std::string Daemon::pollNextText(std::chrono::milliseconds timeout) {
+    auto deadline = std::chrono::steady_clock::now() + timeout;
+    std::string wavPath;
+    {
+        std::unique_lock<std::mutex> lock(qMutex_);
+        if (!qCV_.wait_until(lock, deadline,
+                [&]{ return !speechQueue_.empty() || shutdownRequested.load(); })) {
+            return "";  // timed out
+        }
+        if (shutdownRequested.load() || speechQueue_.empty()) return "";
+        wavPath = speechQueue_.front();
+        speechQueue_.pop();
+    }
+    if (!transcriber_) return "";
+    return transcriber_->transcribe(wavPath);
+}
+
+// Regex for the affirmative side of the confirmation gate. Kept generous —
+// the cost of a false negative is just "user has to repeat 'yes'", the cost
+// of a false positive is a destructive step the user didn't authorize. So
+// we only match words that are unambiguously affirmative.
+static bool isAffirmative(const std::string& text) {
+    static const std::regex yesRe(
+        R"(\b(yes|yeah|yep|yup|sure|go ahead|proceed|confirm(?:ed)?|do it|approved?|ok(?:ay)?)\b)",
+        std::regex::icase);
+    return std::regex_search(text, yesRe);
+}
+
+void Daemon::runPlannerGoal(const std::string& goal, const LLMContext& ctx) {
+    if (!planner_) {
+        tts_->speak("Planner unavailable.");
+        return;
+    }
+
+    // Confirmation callback — speak the (already humanized) prompt, listen
+    // for one voice YES, then re-mute.
+    auto onConfirm = [this](const std::string& prompt, const PlanStep& step) -> bool {
+        (void)step;
+        tts_->speak(prompt);
+        recorder_->unmute();
+        std::string reply = pollNextText(std::chrono::milliseconds(7000));
+        recorder_->mute();
+        bool ok = !reply.empty() && isAffirmative(reply);
+        Logger::info(std::string("Planner confirm: reply='") + reply +
+                     "' → " + (ok ? "YES" : "NO"));
+        return ok;
+    };
+
+    // Progress callback — simple inline narration via TTS. Sentences are
+    // short so an interrupt fired between them lands quickly.
+    auto onProgress = [this](const std::string& message) {
+        if (abortRequested_.load()) return;
+        tts_->speak(message);
+    };
+
+    // Abort-check callback — polled by the planner between steps. Drains
+    // any pending speech from the queue, transcribes it, and sets
+    // abortRequested_ if the user said something interrupt-shaped. Also
+    // honors the SIGUSR1 hard-pause path that flips abortRequested_ directly.
+    auto shouldAbort = [this]() -> bool {
+        if (abortRequested_.load()) return true;
+
+        // Don't drain the queue while TTS is actively speaking — the mic
+        // picks up ARIA's own voice via speaker loopback, and ARIA might
+        // say "stop" or "cancel" inside her own narration ("I won't run
+        // that…"), which would self-abort the plan.
+        if (tts_->isSpeaking()) return false;
+
+        // Try non-blocking pop. The planner is on this same thread so we
+        // need to do this work synchronously between steps; the recorder is
+        // unmuted so it has had a chance to enqueue something while the
+        // last step ran.
+        std::string wavPath;
+        {
+            std::unique_lock<std::mutex> lock(qMutex_);
+            if (speechQueue_.empty()) return false;
+            wavPath = speechQueue_.front();
+            speechQueue_.pop();
+        }
+        if (wavPath.empty() || !transcriber_) return false;
+
+        std::string text = transcriber_->transcribe(wavPath);
+        if (text.empty()) return false;
+
+        Logger::info("Planner mid-execution heard: \"" + text + "\"");
+        if (isInterruptCommand(text)) {
+            tts_->interrupt();
+            abortRequested_.store(true);
+            return true;
+        }
+        // Non-interrupt utterance during plan — drop it. (Future: queue
+        // post-plan tasks for the user.)
+        return false;
+    };
+
+    // Unmute the recorder so the user can say "stop" during the plan.
+    // processUtterance muted it before dispatching to the LLM; we hand
+    // that responsibility to the planner from here.
+    recorder_->unmute();
+    plannerActive_.store(true);
+
+    PlanResult result = planner_->run(goal, ctx, onConfirm, onProgress, shouldAbort);
+
+    plannerActive_.store(false);
+    recorder_->mute();  // restore the contract processUtterance expects
+
+    if (!result.summary.empty() && !abortRequested_.load())
+        tts_->speak(result.summary);
+
+    memory_->save("assistant",
+                  std::string("plan_result:") +
+                  (result.success ? "ok" : (result.aborted ? "aborted" : "partial")) +
+                  " (" + std::to_string(result.stepsExecuted) + " step" +
+                  (result.stepsExecuted == 1 ? "" : "s") + ") " + result.summary);
+
+    Logger::info("Planner finished: success=" + std::to_string(result.success) +
+                 " aborted="  + std::to_string(result.aborted) +
+                 " steps="    + std::to_string(result.stepsExecuted));
+}
+
 // Summarize older turns into a compact blurb so LLM context never explodes.
 // Detaches to avoid stalling the user; runs every ~20 fresh turns.
 void Daemon::maybeSummarize() {
@@ -334,6 +497,11 @@ void Daemon::handleLLMResponse(LLMResponse& response, LLMContext& ctx,
         std::string lastObservation;
 
         while (response.hasAction() && !response.done && step < maxSteps) {
+            if (abortRequested_.load()) {
+                Logger::info("ReAct: aborted by user");
+                tts_->speak("Stopped.");
+                break;
+            }
             if (std::chrono::steady_clock::now() > deadline) {
                 Logger::warn("ReAct: 30s wall-clock timeout");
                 break;
@@ -368,8 +536,10 @@ void Daemon::handleLLMResponse(LLMResponse& response, LLMContext& ctx,
 
             lastObservation = observation;
 
-            if (!response.speech.empty())
-                tts_->speak(response.speech);
+            // NOTE: response.speech was already delivered to TTS via feedChunk
+            // during the preceding {think,react}Streaming call, and flushed by
+            // the endStream() above. Do NOT tts_->speak(response.speech) here —
+            // that would replay the same line a second time.
 
             step++;
             if (step >= maxSteps || std::chrono::steady_clock::now() > deadline) {
@@ -400,7 +570,17 @@ void Daemon::handleLLMResponse(LLMResponse& response, LLMContext& ctx,
         }
     } else {
         // Simple action(s) — execute directly, no observation loop needed.
+        // Exception: the "plan" pseudo-action hands control to the agentic
+        // planner, which has its own execute/reflect/replan loop.
         for (auto& act : response.actions) {
+            if (act.type == "plan") {
+                std::string goal = arg(act.args, "goal");
+                if (goal.empty()) goal = origText;
+                Logger::info("LLM: delegating to planner — " + goal);
+                memory_->save("assistant", "plan:" + act.args.dump());
+                runPlannerGoal(goal, ctx);
+                continue;
+            }
             Logger::info("LLM action: " + act.type + " → " + act.args.dump());
             std::string feedback = executeAction(act);
             memory_->save("assistant", act.type + ":" + act.args.dump());
@@ -409,11 +589,10 @@ void Daemon::handleLLMResponse(LLMResponse& response, LLMContext& ctx,
         }
     }
 
-    // Speak any speech that arrived alongside tool calls.
-    if (!response.speech.empty() && response.hasAction()) {
+    // Persist the assistant speech alongside tool calls. Do NOT re-speak —
+    // streaming already delivered it to TTS before handleLLMResponse ran.
+    if (!response.speech.empty() && response.hasAction())
         memory_->save("assistant", response.speech);
-        tts_->speak(response.speech);
-    }
 }
 
 // ─── Main utterance processor ───
@@ -423,9 +602,15 @@ void Daemon::processUtterance(const std::string& rawText) {
 
     if (isInterruptCommand(text)) {
         tts_->interrupt();
-        Logger::info("ARIA: interrupted.");
+        // Also flip the planner / ReAct abort flag so any in-flight task
+        // (running on a worker thread) exits at its next check.
+        abortRequested_.store(true);
+        Logger::info("ARIA: interrupted by voice — '" + text + "'");
         return;
     }
+
+    // Fresh utterance — clear any stale abort flag from the prior task.
+    abortRequested_.store(false);
 
     // Wake-word gate — optional, controlled by ARIA_WAKE_WORD env var.
     if (wakeRequired_) {
@@ -541,6 +726,17 @@ void Daemon::processUtterance(const std::string& rawText) {
         return;
     }
 
+    // Conversational fast-path — block the LLM from hallucinating tool calls
+    // on phrases like "you're ready to go" (was calling system_info).
+    if (const char* reply = matchSmallTalk(text)) {
+        Logger::info("Small-talk fast-path: \"" + text + "\" → " + reply);
+        memory_->save("user", text);
+        memory_->save("assistant", reply);
+        tts_->speak(reply);
+        recorder_->unmute();
+        return;
+    }
+
     // Check Ollama health before wasting effort building context.
     if (!llm_->isAvailable()) {
         Logger::warn("LLM: Ollama unreachable, retrying once...");
@@ -602,6 +798,7 @@ void Daemon::run() {
     LLM         llm(cfg.ollama_model, &memory);
     Executor    executor;
     TTS         tts(cfg.piper_model);
+    Planner     planner(&llm, &executor, &memory);
 
     // Publish member pointers for the extracted methods.
     transcriber_ = &transcriber;
@@ -609,6 +806,7 @@ void Daemon::run() {
     llm_         = &llm;
     executor_    = &executor;
     tts_         = &tts;
+    planner_     = &planner;
 
     // Startup Ollama probe — warn but don't bail; intent-only commands
     // still work without the LLM.
@@ -616,15 +814,11 @@ void Daemon::run() {
         Logger::warn("LLM: Ollama unreachable at " + cfg.ollama_url +
                      " — LLM queries will fail until it's up.");
 
-    std::mutex              qMutex;
-    std::queue<std::string> speechQueue;
-    std::condition_variable qCV;
-
     Recorder recorder("/tmp/aria_speech.wav",
-        [&](const std::string& wavPath) {
-            std::lock_guard<std::mutex> lock(qMutex);
-            speechQueue.push(wavPath);
-            qCV.notify_one();
+        [this](const std::string& wavPath) {
+            std::lock_guard<std::mutex> lock(qMutex_);
+            speechQueue_.push(wavPath);
+            qCV_.notify_one();
         });
     recorder_ = &recorder;
 
@@ -698,12 +892,12 @@ void Daemon::run() {
 
     std::thread processor([&]() {
         while (!shutdownRequested.load()) {
-            std::unique_lock<std::mutex> lock(qMutex);
-            qCV.wait_for(lock, std::chrono::milliseconds(100),
-                [&]{ return !speechQueue.empty() || shutdownRequested.load(); });
-            if (speechQueue.empty()) continue;
-            std::string wavPath = speechQueue.front();
-            speechQueue.pop();
+            std::unique_lock<std::mutex> lock(qMutex_);
+            qCV_.wait_for(lock, std::chrono::milliseconds(100),
+                [&]{ return !speechQueue_.empty() || shutdownRequested.load(); });
+            if (speechQueue_.empty()) continue;
+            std::string wavPath = speechQueue_.front();
+            speechQueue_.pop();
             lock.unlock();
 
             if (!ariaActive_.load()) continue;
@@ -746,10 +940,24 @@ void Daemon::run() {
         if (pauseToggle.exchange(false)) {
             bool nowActive = !ariaActive_.load();
             ariaActive_.store(nowActive);
+
+            // Hard-stop the world: kill any ongoing TTS, signal in-flight
+            // planner / ReAct work to bail, drop pending speech segments
+            // so resumed listening doesn't replay a stale queue.
+            tts.interrupt();
+            abortRequested_.store(true);
+            {
+                std::lock_guard<std::mutex> lock(qMutex_);
+                std::queue<std::string> empty;
+                speechQueue_.swap(empty);
+            }
+            qCV_.notify_all();
+
             recorder.mute();
             tts.speak(nowActive ? "Back." : "Pausing.");
             if (nowActive) recorder.unmute();
-            Logger::info(nowActive ? "ARIA: resumed." : "ARIA: paused.");
+            Logger::info(nowActive ? "ARIA: resumed."
+                                    : "ARIA: paused (hard-stop, queue cleared).");
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }

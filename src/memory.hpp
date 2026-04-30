@@ -37,6 +37,17 @@ struct EntityRow {
     std::string lastSeen;
 };
 
+// Phase 11: persisted agentic plan. steps_json is the full plan steps array,
+// outcome is a short human-readable summary ("completed", "aborted: ...",
+// "failed: ...") written once the planner finishes.
+struct PlanRow {
+    int id = 0;
+    std::string goal;
+    std::string stepsJson;
+    std::string outcome;
+    std::string createdAt;
+};
+
 class Memory {
 public:
     explicit Memory(const std::string& dbPath);
@@ -75,6 +86,16 @@ public:
     void addEntityRelation(int entity1Id, const std::string& relation,
                            int entity2Id, const std::string& context);
     std::vector<EntityRow> listEntities(const std::string& type = "", int limit = 20) const;
+
+    // ─── Phase 11: agentic plans ───
+    // savePlan returns the new row id. outcome may be empty at the start and
+    // updated later via updatePlanOutcome once the planner finishes.
+    int  savePlan(const std::string& goal, const std::string& stepsJson,
+                  const std::string& outcome = "");
+    void updatePlanOutcome(int planId, const std::string& outcome,
+                           const std::string& stepsJson = "");
+    std::vector<PlanRow> recentPlans(int n = 5) const;
+    std::vector<PlanRow> findPlansByGoal(const std::string& goalLike, int n = 3) const;
 
 private:
     sqlite3* db_{nullptr};

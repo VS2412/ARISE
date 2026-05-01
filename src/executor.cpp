@@ -520,35 +520,127 @@ std::string Executor::execute(const AgentAction& action) {
     }
 
     // ─── Phase 2F: System diagnostics ───
+    // Every category returns a one-line spoken sentence so Piper doesn't have
+    // to read raw `df -h` / `free -h` columns out loud.
     if (action.type == "sysinfo") {
         std::string cat = arg(action.args, "category");
         if (cat.empty()) cat = "all";
-        std::string result;
-        if (cat == "disk" || cat == "all")
-            result += "DISK:\n" + shellCapture("df -h --output=target,size,avail,pcent / /home 2>/dev/null") + "\n";
-        if (cat == "memory" || cat == "all")
-            result += "MEMORY:\n" + shellCapture("free -h") + "\n";
-        if (cat == "cpu" || cat == "all")
-            result += "CPU:\n" + shellCapture("top -bn1 | head -5") + "\n";
-        if (cat == "battery" || cat == "all") {
-            std::string bat = shellCapture("cat /sys/class/power_supply/BAT*/capacity 2>/dev/null");
-            // Strip trailing newline / whitespace from the cat output so TTS
-            // reads "Battery is at 61 percent." not "BATTERY: 61 \n%".
-            while (!bat.empty() && (bat.back() == '\n' || bat.back() == '\r' ||
-                                    bat.back() == ' ' || bat.back() == '\t'))
-                bat.pop_back();
-            if (bat.find("No such file") == std::string::npos &&
-                bat.find("Command failed") == std::string::npos &&
-                !bat.empty()) {
-                if (cat == "battery")
-                    result = "Battery is at " + bat + " percent.";
-                else
-                    result += "Battery is at " + bat + " percent.\n";
+
+        auto rtrim = [](std::string& s) {
+            while (!s.empty() && (s.back() == '\n' || s.back() == '\r' ||
+                                  s.back() == ' '  || s.back() == '\t'))
+                s.pop_back();
+        };
+
+        // Pull a compact "23G" → "23 gigs" / "512M" → "512 megs" reading.
+        auto humanSize = [](const std::string& tok) -> std::string {
+            if (tok.empty()) return tok;
+            char unit = tok.back();
+            std::string num = tok.substr(0, tok.size() - 1);
+            switch (unit) {
+                case 'T': case 't': return num + " terabytes";
+                case 'G': case 'g': return num + " gigs";
+                case 'M': case 'm': return num + " megs";
+                case 'K': case 'k': return num + " kay";
+                default: return tok;
             }
+        };
+
+        auto sentenceDisk = [&]() -> std::string {
+            std::string raw = shellCapture(
+                "df -h --output=target,size,avail / /home 2>/dev/null | tail -n +2");
+            rtrim(raw);
+            if (raw.empty()) return "";
+            std::vector<std::string> parts;
+            std::istringstream iss(raw);
+            std::string line;
+            while (std::getline(iss, line)) {
+                std::istringstream ls(line);
+                std::string mount, size, avail;
+                if (!(ls >> mount >> size >> avail)) continue;
+                std::string label = (mount == "/") ? "Root" :
+                                    (mount == "/home") ? "Home" : mount;
+                parts.push_back(label + " has " + humanSize(avail) +
+                                " free of " + humanSize(size));
+            }
+            if (parts.empty()) return "";
+            std::string out;
+            for (size_t i = 0; i < parts.size(); ++i) {
+                if (i) out += (i + 1 == parts.size() ? ", and " : ", ");
+                out += parts[i];
+            }
+            return out + ".";
+        };
+
+        auto sentenceMemory = [&]() -> std::string {
+            std::string raw = shellCapture("free -h | awk 'NR==2{print $2,$3,$7}'");
+            rtrim(raw);
+            if (raw.empty()) return "";
+            std::istringstream iss(raw);
+            std::string total, used, avail;
+            if (!(iss >> total >> used >> avail)) return "";
+            return "Using " + humanSize(used) + " of " + humanSize(total) +
+                   ", " + humanSize(avail) + " available.";
+        };
+
+        auto sentenceCpu = [&]() -> std::string {
+            // `top -bn1` line 3 has "%Cpu(s):  X.X us, ..."; capture us+sy.
+            std::string raw = shellCapture(
+                "top -bn1 | awk '/^%Cpu/ {gsub(\",\",\"\"); print $2+$4; exit}'");
+            rtrim(raw);
+            if (raw.empty()) return "";
+            // Round to nearest int for cleaner speech.
+            try {
+                double pct = std::stod(raw);
+                int rounded = static_cast<int>(pct + 0.5);
+                return "CPU load is around " + std::to_string(rounded) + " percent.";
+            } catch (...) { return "CPU load is " + raw + " percent."; }
+        };
+
+        auto sentenceBattery = [&]() -> std::string {
+            std::string bat = shellCapture(
+                "cat /sys/class/power_supply/BAT*/capacity 2>/dev/null");
+            rtrim(bat);
+            if (bat.empty() || bat.find("No such file") != std::string::npos ||
+                bat.find("Command failed") != std::string::npos)
+                return "";
+            std::string status = shellCapture(
+                "cat /sys/class/power_supply/BAT*/status 2>/dev/null");
+            rtrim(status);
+            std::string suffix = ".";
+            if (status == "Charging")    suffix = " and charging.";
+            else if (status == "Discharging") suffix = " on battery.";
+            return "Battery is at " + bat + " percent" + suffix;
+        };
+
+        auto sentenceNetwork = [&]() -> std::string {
+            // pick the first UP iface and its IPv4
+            std::string raw = shellCapture(
+                "ip -br -4 addr 2>/dev/null | awk '$2==\"UP\"{print $1,$3; exit}'");
+            rtrim(raw);
+            if (raw.empty()) return "Not connected.";
+            std::istringstream iss(raw);
+            std::string iface, cidr;
+            if (!(iss >> iface >> cidr)) return "Not connected.";
+            // strip /XX prefix
+            auto slash = cidr.find('/');
+            std::string ip = (slash == std::string::npos) ? cidr : cidr.substr(0, slash);
+            return "Connected on " + iface + " with IP " + ip + ".";
+        };
+
+        std::vector<std::string> sentences;
+        if (cat == "disk"    || cat == "all") { auto s = sentenceDisk();    if (!s.empty()) sentences.push_back(s); }
+        if (cat == "memory"  || cat == "all") { auto s = sentenceMemory();  if (!s.empty()) sentences.push_back(s); }
+        if (cat == "cpu"     || cat == "all") { auto s = sentenceCpu();     if (!s.empty()) sentences.push_back(s); }
+        if (cat == "battery" || cat == "all") { auto s = sentenceBattery(); if (!s.empty()) sentences.push_back(s); }
+        if (cat == "network" || cat == "all") { auto s = sentenceNetwork(); if (!s.empty()) sentences.push_back(s); }
+
+        std::string out;
+        for (size_t i = 0; i < sentences.size(); ++i) {
+            if (i) out += " ";
+            out += sentences[i];
         }
-        if (cat == "network" || cat == "all")
-            result += "NETWORK:\n" + shellCapture("ip -br addr 2>/dev/null | head -5") + "\n";
-        return result;
+        return out;
     }
 
     Logger::warn("Executor: unknown action: " + action.type);

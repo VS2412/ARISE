@@ -68,7 +68,30 @@ static std::string sanitizeForSpeech(const std::string& in) {
     s = std::regex_replace(s, std::regex(R"(\{\}\s*\+)"), "");
     s = std::regex_replace(s, std::regex(R"(\*\.([a-zA-Z0-9]+))"), "$1 files");
     s = std::regex_replace(s, std::regex(R"(\b-rf?\b)"), "");
-    s = std::regex_replace(s, std::regex(R"([`'\"\[\]{}|<>])"), " ");
+    // Strip punctuation that Piper voices literally — but preserve apostrophes
+    // and quotes that sit between two letters (contractions: "What's", "don't")
+    // so they remain natural in speech.
+    {
+        std::string out;
+        out.reserve(s.size());
+        for (size_t i = 0; i < s.size(); ++i) {
+            char c = s[i];
+            if (c == '`' || c == '\'' || c == '"') {
+                bool prevAlpha = (i > 0) &&
+                    std::isalpha(static_cast<unsigned char>(s[i - 1]));
+                bool nextAlpha = (i + 1 < s.size()) &&
+                    std::isalpha(static_cast<unsigned char>(s[i + 1]));
+                if (prevAlpha && nextAlpha) { out += c; continue; }
+                out += ' ';
+            } else if (c == '[' || c == ']' || c == '{' || c == '}' ||
+                       c == '|' || c == '<' || c == '>') {
+                out += ' ';
+            } else {
+                out += c;
+            }
+        }
+        s = std::move(out);
+    }
     s = std::regex_replace(s, std::regex(R"(\bmv -t\b)"), "move into");
     s = std::regex_replace(s, std::regex(R"(\bmkdir -p\b)"), "create folders");
     s = std::regex_replace(s, std::regex(R"(\bfind\b)"), "find ");

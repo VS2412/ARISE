@@ -78,6 +78,12 @@ static const char* matchSmallTalk(const std::string& text) {
         { std::regex(R"(^(running smooth|all good|no problem|np)$)", std::regex::icase), "Glad to hear it." },
         { std::regex(R"(^(good (morning|afternoon|evening|night)|morning|evening)$)", std::regex::icase), "Morning." },
         { std::regex(R"(^(bye|goodbye|see you|cya|talk later)$)", std::regex::icase), "Later." },
+        { std::regex(R"(^(hello|hi|hey|hiya|yo)( there)?$)", std::regex::icase), "Hey." },
+        { std::regex(R"(^(how are you|how'?s it going|how you doing|what'?s up|what'?s good|sup)( today)?$)", std::regex::icase), "All good. You?" },
+        { std::regex(R"(^(love you|love ya)$)", std::regex::icase), "Likewise." },
+        { std::regex(R"(^(you'?re (the )?best|nice work|good job|well done)$)", std::regex::icase), "Thanks." },
+        { std::regex(R"(^(yes|yeah|yep|yup|sure|of course)$)", std::regex::icase), "Got it." },
+        { std::regex(R"(^(no|nope|nah|not really)$)", std::regex::icase), "Okay." },
     };
     for (auto& [re, reply] : kSmallTalk) {
         if (std::regex_match(trimmed, re)) return reply;
@@ -600,7 +606,11 @@ void Daemon::handleLLMResponse(LLMResponse& response, LLMContext& ctx,
 void Daemon::processUtterance(const std::string& rawText) {
     std::string text = rawText;
 
-    if (isInterruptCommand(text)) {
+    // Only treat the utterance as an interrupt if there's actually something
+    // to interrupt — otherwise "stop" while idle gets eaten and never reaches
+    // the LLM (annoying when the user really did want to chat).
+    bool busy = (tts_ && tts_->isSpeaking()) || plannerActive_.load();
+    if (busy && isInterruptCommand(text)) {
         tts_->interrupt();
         // Also flip the planner / ReAct abort flag so any in-flight task
         // (running on a worker thread) exits at its next check.

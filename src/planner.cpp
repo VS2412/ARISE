@@ -504,12 +504,22 @@ PlanResult Planner::run(const std::string& goal,
     bool blanketConfirmed = destructiveIdx.empty();
     if (!destructiveIdx.empty()) {
         std::ostringstream prompt;
-        prompt << "I'll ";
-        for (size_t i = 0; i < destDesc.size(); ++i) {
-            if (i > 0) prompt << (i + 1 == destDesc.size() ? ", and " : ", ");
-            prompt << destDesc[i];
+        // For 1–2 destructive steps, enumerate them so the user knows exactly
+        // what they're approving. For 3+, switch to a one-line summary —
+        // the previous version would read out 4-step plans verbatim and the
+        // user would tune out before saying yes.
+        if (destDesc.size() <= 2) {
+            prompt << "I'll ";
+            for (size_t i = 0; i < destDesc.size(); ++i) {
+                if (i > 0) prompt << ", and ";
+                prompt << destDesc[i];
+            }
+            prompt << ". Say yes to proceed.";
+        } else {
+            prompt << "I'll run a " << plan.steps.size()
+                   << "-step plan with " << destDesc.size()
+                   << " changes. Say yes to proceed.";
         }
-        prompt << ". Say yes to proceed.";
 
         if (onConfirm) {
             blanketConfirmed = onConfirm(prompt.str(), plan.steps[destructiveIdx.front()]);

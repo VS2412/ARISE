@@ -58,3 +58,6 @@ target_link_libraries(ai-agent PRIVATE
 
 target_compile_options(ai-agent PRIVATE -Wall -Wextra -O2 ${FVAD_CFLAGS_OTHER})
 target_compile_definitions(ai-agent PRIVATE _POSIX_C_SOURCE=200809L)
+
+enable_testing()
+add_subdirectory(arise)

@@ -4,14 +4,20 @@
 // phases turn these into IPC calls to a long-running process. Subcommands
 // are deliberately handrolled (no new deps) — the surface is small.
 
+#include "blackboard/blackboard.hpp"
 #include "cortex/identity.hpp"
 #include "cortex/memory_cortex.hpp"
+#include "perception/perception.hpp"
+#include "perception/privacy_gate.hpp"
+#include "perception/system_snapshot.hpp"
 #include "util/log.hpp"
 #include "util/paths.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <chrono>
+#include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
@@ -20,6 +26,7 @@
 #include <optional>
 #include <sstream>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -112,6 +119,15 @@ int cmdHelp(int = 0) {
 "  identity show\n"
 "  identity set [--name N] [--pronouns P] [--persona TEXT]\n"
 "               [--add-do TEXT] [--add-dont TEXT]\n"
+"\n"
+"  perceive [--vision-fps F] [--no-vision] [--no-system] [--no-idle]\n"
+"           [--threshold N] [--seconds N] [--episodic] [--verbose]\n"
+"           [--private app1,app2] [--strict-privacy]\n"
+"           run perception loop, print live blackboard events to stdout\n"
+"\n"
+"  system snapshot                   one-shot system state JSON\n"
+"  privacy check [--private apps]    test the privacy gate against current focus\n"
+"  blackboard tail                   (placeholder; in-process bus, see perceive)\n"
 "\n"
 "  import-aria [--source PATH] [--dry-run]\n"
 "\n"
@@ -436,6 +452,145 @@ int cmdImportAria(const Args& a) {
     return 0;
 }
 
+// ─── perceive / system / privacy / blackboard ────────────────────────────
+
+std::vector<std::string> splitCsv(const std::string& s) {
+    std::vector<std::string> out;
+    std::stringstream ss(s);
+    for (std::string tok; std::getline(ss, tok, ',');) {
+        // trim
+        std::size_t i = 0;
+        while (i < tok.size() && std::isspace(static_cast<unsigned char>(tok[i]))) ++i;
+        std::size_t j = tok.size();
+        while (j > i && std::isspace(static_cast<unsigned char>(tok[j-1]))) --j;
+        if (j > i) out.push_back(tok.substr(i, j - i));
+    }
+    return out;
+}
+
+std::string truncatePayload(const std::string& s, std::size_t cap = 200) {
+    if (s.size() <= cap) return s;
+    return s.substr(0, cap) + "…";
+}
+
+std::string fmtClock(arise::BBTimestamp ts) {
+    auto t = system_clock::to_time_t(ts);
+    std::tm tm_buf{}; localtime_r(&t, &tm_buf);
+    char buf[16];
+    std::strftime(buf, sizeof buf, "%H:%M:%S", &tm_buf);
+    return buf;
+}
+
+std::atomic<bool> g_stop{false};
+extern "C" void onSig(int) { g_stop.store(true); }
+
+int cmdPerceive(const Args& a) {
+    arise::Perception::Config pc;
+    pc.vision_interval_ms = a.has("vision-fps")
+        ? std::max(50, int(1000.0 / std::max(0.001, std::atof(a.get("vision-fps").c_str()))))
+        : 1000;
+    if (a.has("vision-interval-ms"))
+        pc.vision_interval_ms = std::atoi(a.get("vision-interval-ms").c_str());
+    if (a.has("system-interval-ms"))
+        pc.system_interval_ms = std::atoi(a.get("system-interval-ms").c_str());
+    if (a.has("idle-threshold-ms"))
+        pc.idle_threshold_ms = std::atoi(a.get("idle-threshold-ms").c_str());
+    if (a.has("threshold"))
+        pc.vision_diff_threshold = std::atoi(a.get("threshold").c_str());
+    if (a.has("private"))
+        pc.private_apps = splitCsv(a.get("private"));
+    pc.failsafe_private_on_probe_error = a.has("strict-privacy");
+    pc.episodic_writes = a.has("episodic");
+    pc.emit_unchanged_frames = a.has("verbose");
+
+    if (a.has("no-vision")) pc.vision_interval_ms = 0;
+    if (a.has("no-system")) pc.system_interval_ms = 0;
+    if (a.has("no-idle"))   pc.idle_threshold_ms = 0;
+
+    arise::Blackboard bb;
+    pc.bb = &bb;
+
+    std::unique_ptr<arise::MemoryCortex> cortex;
+    if (pc.episodic_writes) {
+        cortex = std::make_unique<arise::MemoryCortex>(defaultCortexConfig());
+        pc.cortex = cortex.get();
+    }
+
+    std::cout << "perceive: vision=" << (pc.vision_interval_ms ? "on" : "off")
+              << " system=" << (pc.system_interval_ms ? "on" : "off")
+              << " idle="   << (pc.idle_threshold_ms ? "on" : "off")
+              << " episodic=" << (pc.episodic_writes ? "on" : "off")
+              << "  (Ctrl-C to stop)\n";
+
+    arise::Perception perc(pc);
+    auto sub = bb.subscribe("");          // wildcard tail
+    perc.start();
+
+    std::signal(SIGINT,  onSig);
+    std::signal(SIGTERM, onSig);
+
+    int seconds = a.has("seconds") ? std::atoi(a.get("seconds").c_str()) : -1;
+    auto deadline = system_clock::now() + std::chrono::seconds(seconds);
+
+    while (!g_stop.load()) {
+        if (seconds > 0 && system_clock::now() >= deadline) break;
+        auto ev = sub.next(std::chrono::milliseconds(250));
+        if (!ev) continue;
+        std::cout << "[" << fmtClock(ev->ts) << "] " << ev->topic
+                  << "  " << truncatePayload(ev->payload.dump()) << "\n";
+        std::cout.flush();
+    }
+
+    sub.stop();
+    perc.stop();
+
+    auto st = perc.stats();
+    std::cout << "\n-- stats --\n"
+              << "frames_captured  = " << st.frames_captured  << "\n"
+              << "frames_changed   = " << st.frames_changed   << "\n"
+              << "frames_unchanged = " << st.frames_unchanged << "\n"
+              << "frames_failed    = " << st.frames_failed    << "\n"
+              << "system_samples   = " << st.system_samples   << "\n"
+              << "system_deltas    = " << st.system_deltas    << "\n"
+              << "privacy_holds    = " << st.privacy_holds    << "\n"
+              << "idle_entries     = " << st.idle_entries     << "\n"
+              << "idle_exits       = " << st.idle_exits       << "\n"
+              << "events_total     = " << bb.totalPublished() << "\n";
+    return 0;
+}
+
+int cmdSystemSnapshot() {
+    auto s = arise::sys::take();
+    std::cout << arise::sys::toJson(s).dump(2) << "\n";
+    return 0;
+}
+
+int cmdPrivacyCheck(const Args& a) {
+    arise::PrivacyGate::Config c;
+    c.private_apps = splitCsv(a.get("private"));
+    c.failsafe_private_on_probe_error = a.has("strict");
+    arise::PrivacyGate gate(c);
+
+    auto cur_app = arise::sys::take().active_app.value_or("");
+    bool blocked = gate.isPrivate();
+
+    json out;
+    out["active_app"]    = cur_app.empty() ? json(nullptr) : json(cur_app);
+    out["private_apps"]  = c.private_apps;
+    out["would_block"]   = blocked;
+    out["matched_app"]   = gate.lastMatched();
+    std::cout << out.dump(2) << "\n";
+    return 0;
+}
+
+int cmdBlackboardTail() {
+    std::cerr <<
+"blackboard tail: ARISE phase 1 has no daemon yet, so the blackboard is\n"
+"in-process only. Use `arise perceive` to see live events as perception\n"
+"emits them; a daemonised tap arrives in phase 2 commit 2.\n";
+    return 2;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -477,6 +632,34 @@ int main(int argc, char** argv) {
     }
 
     if (cmd == "import-aria") return cmdImportAria(a);
+
+    if (cmd == "perceive") return cmdPerceive(a);
+
+    if (cmd == "system") {
+        if (a.pos.empty()) { std::cerr << "system: subcommand required\n"; return 2; }
+        std::string sub = a.pos[0];
+        Args sa = a; sa.pos.erase(sa.pos.begin());
+        if (sub == "snapshot") return cmdSystemSnapshot();
+        std::cerr << "system: unknown subcommand '" << sub << "'\n";
+        return 2;
+    }
+
+    if (cmd == "privacy") {
+        if (a.pos.empty()) { std::cerr << "privacy: subcommand required\n"; return 2; }
+        std::string sub = a.pos[0];
+        Args sa = a; sa.pos.erase(sa.pos.begin());
+        if (sub == "check") return cmdPrivacyCheck(sa);
+        std::cerr << "privacy: unknown subcommand '" << sub << "'\n";
+        return 2;
+    }
+
+    if (cmd == "blackboard") {
+        if (a.pos.empty()) { std::cerr << "blackboard: subcommand required\n"; return 2; }
+        std::string sub = a.pos[0];
+        if (sub == "tail") return cmdBlackboardTail();
+        std::cerr << "blackboard: unknown subcommand '" << sub << "'\n";
+        return 2;
+    }
 
     std::cerr << "unknown command: " << cmd << "\n";
     return cmdHelp();

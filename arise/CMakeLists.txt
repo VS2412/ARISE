@@ -16,6 +16,11 @@ add_library(arise-core STATIC
     util/embedding_client.cpp
     cortex/memory_cortex.cpp
     cortex/identity.cpp
+    blackboard/blackboard.cpp
+    perception/phash.cpp
+    perception/system_snapshot.cpp
+    perception/privacy_gate.cpp
+    perception/perception.cpp
 )
 target_include_directories(arise-core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(arise-core PUBLIC
@@ -33,7 +38,11 @@ target_compile_options(arise PRIVATE -Wall -Wextra -O2)
 
 if(GTest_FOUND)
     enable_testing()
-    add_executable(arise-tests tests/test_memory_cortex.cpp)
+    add_executable(arise-tests
+        tests/test_memory_cortex.cpp
+        tests/test_blackboard.cpp
+        tests/test_perception.cpp
+    )
     target_link_libraries(arise-tests PRIVATE
         arise-core
         GTest::gtest

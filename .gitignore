@@ -143,3 +143,8 @@ temp/
 # Optional (UNCOMMENT if training = data)
 # ------------------------------
 # training/
+
+
+*.md
+Phases.md
+PHASES.md

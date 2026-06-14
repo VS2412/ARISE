@@ -25,6 +25,16 @@ std::string identityDir() { return ariseRoot() + "/identity"; }
 std::string cacheDir()    { return ariseRoot() + "/cache";    }
 std::string logsDir()     { return ariseRoot() + "/logs";     }
 std::string runtimeDir()  { return ariseRoot() + "/runtime";  }
+std::string goalsDbPath() { return memoryDir() + "/goals.db"; }
+std::string toolsDir()         { return ariseRoot() + "/tools"; }
+std::string toolsLearnedDir()  { return toolsDir() + "/learned"; }
+std::string toolsSandboxDir()  { return toolsDir() + "/sandbox"; }
+std::string toolsArchivedDir() { return toolsDir() + "/archived"; }
+std::string feedbackDbPath()   { return memoryDir() + "/feedback.db"; }
+std::string devicesJsonPath()  { return ariseRoot() + "/devices.json"; }
+std::string trainingDir()      { return ariseRoot() + "/training"; }
+std::string adaptersDir()      { return ariseRoot() + "/adapters"; }
+std::string adaptersManifestPath() { return adaptersDir() + "/manifest.json"; }
 
 std::string expandHome(const std::string& p) {
     if (p.size() >= 2 && p[0] == '~' && p[1] == '/') return home() + p.substr(1);
@@ -51,6 +61,12 @@ std::string ensureLayout() {
     ensureDir(cacheDir());
     ensureDir(logsDir());
     ensureDir(runtimeDir());
+    ensureDir(toolsDir());
+    ensureDir(toolsLearnedDir());
+    ensureDir(toolsSandboxDir());
+    ensureDir(toolsArchivedDir());
+    ensureDir(trainingDir());
+    ensureDir(adaptersDir());
     return r;
 }
 

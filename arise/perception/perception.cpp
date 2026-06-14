@@ -2,10 +2,14 @@
 
 #include "blackboard/blackboard.hpp"
 #include "cortex/memory_cortex.hpp"
+#include "cortex/salience.hpp"
+#include "perception/audio_scene.hpp"
+#include "perception/mic_capture.hpp"
 #include "perception/phash.hpp"
 #include "perception/privacy_gate.hpp"
 #include "perception/system_snapshot.hpp"
 #include "util/log.hpp"
+#include "util/vision_client.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -49,6 +53,15 @@ struct Perception::Impl {
     std::atomic<long long>      last_activity_ns{0};
     std::atomic<bool>           in_idle{false};
 
+    // Caption throttle + concurrency guard.
+    std::atomic<long long>      last_caption_ns{0};
+    std::atomic<int>            captions_in_flight{0};
+
+    // Audio scene state (last published bucket).
+    std::mutex                  audio_mu;
+    audio::Scene                last_audio_scene = audio::Scene::Unknown;
+    bool                        audio_first_done = false;
+
     explicit Impl(Config c)
         : cfg(std::move(c)),
           gate(PrivacyGate::Config{cfg.private_apps,
@@ -83,6 +96,59 @@ void Perception::start() {
     p_->visionT = std::thread(&Perception::visionLoop, this);
     p_->systemT = std::thread(&Perception::systemLoop, this);
     p_->idleT   = std::thread(&Perception::idleLoop,   this);
+
+    // Audio loop: piggybacks on MicCapture's worker thread (started below).
+    if (p_->cfg.mic && p_->cfg.audio_scene && p_->cfg.audio_scene->isReady()) {
+        p_->cfg.mic->setOnWindow([this](const float* samples, std::size_t n) {
+            { std::lock_guard<std::mutex> lk(p_->stats_mu); ++p_->stats.audio_windows; }
+            auto r = p_->cfg.audio_scene->classify(samples, n);
+            audio::Scene s = r.scene;
+
+            std::lock_guard<std::mutex> lk(p_->audio_mu);
+            json payload = {
+                {"scene",        audio::sceneToString(s)},
+                {"score",        r.score},
+                {"raw_label",    r.display_name},
+                {"class_idx",    r.class_idx},
+            };
+            if (!p_->audio_first_done) {
+                p_->cfg.bb->publish("audio.scene_first", payload);
+                p_->last_audio_scene = s;
+                p_->audio_first_done = true;
+                return;
+            }
+            if (s != p_->last_audio_scene) {
+                payload["prev_scene"] = audio::sceneToString(p_->last_audio_scene);
+                p_->cfg.bb->publish("audio.scene_changed", payload);
+                {
+                    std::lock_guard<std::mutex> sk(p_->stats_mu);
+                    ++p_->stats.audio_scene_changes;
+                }
+                if (p_->cfg.episodic_writes && p_->cfg.cortex
+                    && s != audio::Scene::Unknown) {
+                    EpisodicEvent ev;
+                    ev.kind     = "audio_scene";
+                    ev.summary  = std::string("audio: ")
+                                + audio::sceneToString(p_->last_audio_scene)
+                                + " → " + audio::sceneToString(s);
+                    ev.payload_json = payload.dump();
+                    ev.salience = (s == audio::Scene::Speech ||
+                                   s == audio::Scene::Doorbell ||
+                                   s == audio::Scene::Phone ||
+                                   s == audio::Scene::Alarm) ? 0.5 : 0.25;
+                    p_->cfg.cortex->recordEvent(std::move(ev));
+                }
+                p_->last_audio_scene = s;
+            }
+        });
+        audio::MicCapture::Config mc;
+        mc.alsa_device = p_->cfg.mic_device;
+        if (!p_->cfg.mic->start(mc)) {
+            log::warn("Perception: mic capture failed to start (mic busy?); audio off");
+            p_->cfg.bb->publish("audio.error", json{{"reason", "mic_unavailable"}});
+        }
+    }
+
     log::info("Perception: started");
 }
 
@@ -94,9 +160,20 @@ void Perception::stop() {
         p_->stopping.store(true);
     }
     p_->stop_cv.notify_all();
+    if (p_->cfg.mic) p_->cfg.mic->stop();
     if (p_->visionT.joinable()) p_->visionT.join();
     if (p_->systemT.joinable()) p_->systemT.join();
     if (p_->idleT.joinable())   p_->idleT.join();
+
+    // Wait briefly for in-flight caption workers to finish so they don't UAF
+    // their captured `this` after the destructor returns. Bounded so a stuck
+    // Ollama call can't hang shutdown indefinitely.
+    auto wait_until = steady_clock::now() + seconds(5);
+    while (p_->captions_in_flight.load(std::memory_order_relaxed) > 0
+           && steady_clock::now() < wait_until) {
+        std::this_thread::sleep_for(milliseconds(50));
+    }
+
     log::info("Perception: stopped");
 }
 
@@ -178,12 +255,52 @@ void Perception::visionLoop() {
             { std::lock_guard<std::mutex> lk(p_->stats_mu); ++p_->stats.frames_changed; }
             p_->cfg.bb->publish("vision.screen_changed", payload);
             touchActivity();
-            if (p_->cfg.episodic_writes && p_->cfg.cortex) {
-                EpisodicEvent ev;
-                ev.kind     = "screen_obs";
-                ev.summary  = "screen changed (Δhash=" + std::to_string(dist) + ")";
-                ev.salience = 0.2;        // floor — captioner will boost in commit 2
-                p_->cfg.cortex->recordEvent(std::move(ev));
+
+            // Try to schedule a caption. Triple gate: captioner present, no
+            // worker already running (we keep concurrency at 1 to avoid Ollama
+            // pile-up), and cooldown elapsed since last attempt.
+            bool wrote_episodic_here = false;
+            if (p_->cfg.captioner) {
+                long long now_ns = steady_clock::now().time_since_epoch().count();
+                long long last_ns = p_->last_caption_ns.load(std::memory_order_relaxed);
+                long long elapsed_ms = (now_ns - last_ns) / 1'000'000;
+                bool cool = (last_ns == 0) ||
+                            elapsed_ms >= p_->cfg.caption_cooldown_ms;
+                int  inflight = p_->captions_in_flight.load(std::memory_order_relaxed);
+                if (cool && inflight == 0) {
+                    p_->last_caption_ns.store(now_ns, std::memory_order_relaxed);
+                    p_->captions_in_flight.fetch_add(1, std::memory_order_relaxed);
+                    {
+                        std::lock_guard<std::mutex> lk(p_->stats_mu);
+                        ++p_->stats.captions_attempted;
+                    }
+                    std::uint64_t fh = *h;
+                    int dh = dist;
+                    std::thread([this, fh, dh]() {
+                        runCaptionWorker(fh, dh);
+                    }).detach();
+                    // Episodic write deferred to the worker so it can include
+                    // the caption + real salience.
+                } else {
+                    {
+                        std::lock_guard<std::mutex> lk(p_->stats_mu);
+                        ++p_->stats.captions_throttled;
+                    }
+                }
+            }
+
+            // Default episodic write path (no captioner, or
+            // episodic_caption_only == false).
+            if (p_->cfg.episodic_writes && p_->cfg.cortex && !wrote_episodic_here) {
+                bool skip_due_to_caption = p_->cfg.captioner
+                                           && p_->cfg.episodic_caption_only;
+                if (!skip_due_to_caption) {
+                    EpisodicEvent ev;
+                    ev.kind     = "screen_obs";
+                    ev.summary  = "screen changed (Δhash=" + std::to_string(dist) + ")";
+                    ev.salience = 0.2;
+                    p_->cfg.cortex->recordEvent(std::move(ev));
+                }
             }
         } else {
             { std::lock_guard<std::mutex> lk(p_->stats_mu); ++p_->stats.frames_unchanged; }
@@ -223,6 +340,65 @@ void Perception::systemLoop() {
         prev = cur;
 
         if (p_->sleepFor(p_->cfg.system_interval_ms)) break;
+    }
+}
+
+// ─── caption worker (detached thread per fired caption) ────────────────────
+
+void Perception::runCaptionWorker(std::uint64_t frame_hash, int hamming) {
+    // RAII: decrement in-flight counter even on early return / exception.
+    struct Guard {
+        std::atomic<int>* c;
+        ~Guard() { c->fetch_sub(1, std::memory_order_relaxed); }
+    } guard{ &p_->captions_in_flight };
+
+    if (p_->stopping.load() || !p_->cfg.captioner) return;
+
+    // Capture a fresh PNG. Re-use grim because the aHash loop wrote a P6 PPM
+    // which moondream can't decode. Cheap (~50ms on a desktop) and rare
+    // (gated by caption_cooldown_ms).
+    std::string cmd = "grim " + p_->cfg.grim_extra_args + " "
+                    + "\"" + p_->cfg.caption_image_path + "\" 2>/dev/null";
+    int rc = std::system(cmd.c_str());
+    if (rc != 0) {
+        { std::lock_guard<std::mutex> lk(p_->stats_mu); ++p_->stats.captions_failed; }
+        return;
+    }
+
+    auto caption = p_->cfg.captioner->captionFile(p_->cfg.caption_image_path);
+    if (caption.empty()) {
+        { std::lock_guard<std::mutex> lk(p_->stats_mu); ++p_->stats.captions_failed; }
+        return;
+    }
+
+    // Salience: use the scorer if present, else a sensible mid-floor.
+    SalienceScore s;
+    if (p_->cfg.salience) {
+        s = p_->cfg.salience->score("screen_obs", caption);
+    } else {
+        s.salience = 0.4;
+        s.from_llm = false;
+    }
+
+    json payload = {
+        {"caption",   caption},
+        {"hash",      frame_hash},
+        {"hamming",   hamming},
+        {"salience",  s.salience},
+        {"from_llm",  s.from_llm},
+    };
+    if (!s.reason.empty()) payload["salience_reason"] = s.reason;
+    p_->cfg.bb->publish("vision.caption", payload);
+
+    { std::lock_guard<std::mutex> lk(p_->stats_mu); ++p_->stats.captions_ok; }
+
+    if (p_->cfg.episodic_writes && p_->cfg.cortex) {
+        EpisodicEvent ev;
+        ev.kind         = "screen_obs";
+        ev.summary      = caption;
+        ev.salience     = s.salience;
+        ev.payload_json = payload.dump();
+        p_->cfg.cortex->recordEvent(std::move(ev));
     }
 }
 

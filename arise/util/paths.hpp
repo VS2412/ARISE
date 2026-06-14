@@ -13,6 +13,16 @@ std::string identityDir();   // <root>/identity
 std::string cacheDir();      // <root>/cache
 std::string logsDir();       // <root>/logs
 std::string runtimeDir();    // <root>/runtime
+std::string goalsDbPath();   // <root>/memory/goals.db
+std::string toolsDir();      // <root>/tools
+std::string toolsLearnedDir();   // <root>/tools/learned
+std::string toolsSandboxDir();   // <root>/tools/sandbox
+std::string toolsArchivedDir();  // <root>/tools/archived
+std::string feedbackDbPath();    // <root>/memory/feedback.db
+std::string devicesJsonPath();   // <root>/devices.json
+std::string trainingDir();       // <root>/training
+std::string adaptersDir();       // <root>/adapters
+std::string adaptersManifestPath();  // <root>/adapters/manifest.json
 
 // Idempotently mkdir -p the full layout. Returns the resolved root.
 std::string ensureLayout();

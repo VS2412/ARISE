@@ -76,18 +76,18 @@ ARISE is the third major evolution of this project — built on top of everythin
 
 ```
 ╔══════════════════════════════════════════════════════════════════════════════╗
-║                           ARISE.3.0 RELEASE SURFACE                        ║
+║                           ARISE.3.0 RELEASE SURFACE                          ║
 ╠══════════════════════════════════════════════════════════════════════════════╣
-║  Phase 1  ──  Memory Cortex            (5-type episodic/semantic/procedural)║
-║  Phase 2  ──  Continuous Perception    (vision + audio + system, 24/7)      ║
-║  Phase 3  ──  Goal Stack               (multi-day, reboot-surviving goals)  ║
-║  Phase 4  ──  Cognitive Orchestrator   (primary mind + 5 sub-agents)        ║
-║  Phase 5  ──  Tool Forge               (writes its own tools, sandboxed)    ║
-║  Phase 6  ──  Proactive Engine         (speaks first, adapts to feedback)   ║
-║  Phase 7  ──  Federation               (phone + MQTT + second-screen)       ║
-║  Phase 8  ──  Voice & Persona          (Sesame CSM, mood-aware TTS)         ║
-║  Phase 9  ──  Self-Improvement Loop    (nightly LoRA fine-tuning)           ║
-║  Phase 10 ──  Privacy Vault            (encrypted memory, audit log)        ║
+║  Phase 1  ──  Memory Cortex            (5-type episodic/semantic/procedural) ║
+║  Phase 2  ──  Continuous Perception    (vision + audio + system, 24/7)       ║
+║  Phase 3  ──  Goal Stack               (multi-day, reboot-surviving goals)   ║
+║  Phase 4  ──  Cognitive Orchestrator   (primary mind + 5 sub-agents)         ║
+║  Phase 5  ──  Tool Forge               (writes its own tools, sandboxed)     ║
+║  Phase 6  ──  Proactive Engine         (speaks first, adapts to feedback)    ║
+║  Phase 7  ──  Federation               (phone + MQTT + second-screen)        ║
+║  Phase 8  ──  Voice & Persona          (Sesame CSM, mood-aware TTS)          ║
+║  Phase 9  ──  Self-Improvement Loop    (nightly LoRA fine-tuning)            ║
+║  Phase 10 ──  Privacy Vault            (encrypted memory, audit log)         ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 ```
 
@@ -113,36 +113,36 @@ Every line of ARISE.3.0 code serves exactly one of these five capabilities. Ever
 ┌──────────────────────────────────────────────────────────────────────┐
 │                              ARISE Core                              │
 │                                                                      │
-│   ┌──────────────┐   ┌────────────────┐   ┌──────────────────────┐  │
-│   │  Perception  │──▶│   Blackboard   │◀──│   Goal Stack         │  │
-│   │  (vision +   │   │   (shared      │   │   (durable, multi-   │  │
-│   │   audio +    │   │    state +     │   │    day, dependency-  │  │
-│   │   system)    │   │    event bus)  │   │    aware)            │  │
-│   └──────────────┘   └────────┬───────┘   └──────────────────────┘  │
+│   ┌──────────────┐   ┌────────────────┐   ┌──────────────────────┐   │
+│   │  Perception  │──▶│   Blackboard   │◀──│   Goal Stack         │   │
+│   │  (vision +   │   │   (shared      │   │   (durable, multi-   │   │
+│   │   audio +    │   │    state +     │   │    day, dependency-  │   │
+│   │   system)    │   │    event bus)  │   │    aware)            │   │
+│   └──────────────┘   └────────┬───────┘   └──────────────────────┘   │
 │                               │                                      │
-│   ┌──────────────────────────▼─────────────────────────────────┐   │
-│   │                 Cognitive Orchestrator                       │   │
-│   │  (routes events → primary mind | sub-agents | goal updates) │   │
-│   └──┬─────────┬─────────┬─────────┬─────────────┬──────────────┘   │
-│      │         │         │         │             │                  │
-│   ┌──▼──┐  ┌───▼──┐  ┌───▼────┐  ┌─▼─────┐   ┌──▼────────┐        │
-│   │Mind │  │Coder │  │Watcher │  │Curator│   │Researcher │        │
-│   │qwen3│  │qwen3 │  │qwen3   │  │qwen3  │   │qwen3:8b   │        │
-│   │ :8b │  │coder │  │:0.5b   │  │:0.5b  │   │+ web      │        │
-│   └─────┘  └──────┘  └────────┘  └───────┘   └───────────┘        │
+│   ┌──────────────────────────▼──────────────────────────────────┐    │
+│   │                 Cognitive Orchestrator                      │    │
+│   │  (routes events → primary mind | sub-agents | goal updates) │    │
+│   └──┬─────────┬─────────┬─────────┬─────────────┬──────────────┘    │
+│      │         │         │         │             │                   │
+│   ┌──▼──┐  ┌───▼──┐  ┌───▼────┐  ┌─▼─────┐   ┌──▼────────┐           │
+│   │Mind │  │Coder │  │Watcher │  │Curator│   │Researcher │           │
+│   │qwen3│  │qwen3 │  │qwen3   │  │qwen3  │   │qwen3:8b   │           │
+│   │ :8b │  │coder │  │:0.5b   │  │:0.5b  │   │+ web      │           │
+│   └─────┘  └──────┘  └────────┘  └───────┘   └───────────┘           │
 │                                                                      │
-│   ┌──────────────────────────────────────────────────────────────┐  │
-│   │              Memory Cortex                                    │  │
-│   │   episodic ─ semantic ─ procedural ─ identity ─ preferences  │  │
-│   └──────────────────────────────────────────────────────────────┘  │
+│   ┌──────────────────────────────────────────────────────────────┐   │
+│   │              Memory Cortex                                   │   │
+│   │   episodic ─ semantic ─ procedural ─ identity ─ preferences  │   │
+│   └──────────────────────────────────────────────────────────────┘   │
 │                                                                      │
-│   ┌──────────────────────────────────────────────────────────────┐  │
-│   │              Tool Forge (sandboxed self-extension)            │  │
-│   └──────────────────────────────────────────────────────────────┘  │
+│   ┌──────────────────────────────────────────────────────────────┐   │
+│   │              Tool Forge (sandboxed self-extension)           │   │
+│   └──────────────────────────────────────────────────────────────┘   │
 │                                                                      │
-│   ┌──────────────────────────────────────────────────────────────┐  │
-│   │   Federation: phone bridge ─ MQTT ─ second-screen shard      │  │
-│   └──────────────────────────────────────────────────────────────┘  │
+│   ┌──────────────────────────────────────────────────────────────┐   │
+│   │   Federation: phone bridge ─ MQTT ─ second-screen shard      │   │
+│   └──────────────────────────────────────────────────────────────┘   │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -226,13 +226,13 @@ Primary Mind (qwen3:8b on GPU)
   ↓ delegates via tool call: spawn_subagent(role, task, deadline)
 
 Sub-Agents (qwen3:0.5b on CPU, parallel):
-  ┌──────────────────────────────────────────────────────────────────┐
-  │ Watcher    long-running │ observes blackboard for triggers        │
+  ┌────────────────────────────────────────────────────────────────────┐
+  │ Watcher    long-running │ observes blackboard for triggers         │
   │ Curator    per-convo    │ distills transcripts into semantic facts │
-  │ Researcher on-demand    │ web/file search, multi-step ReAct loop  │
-  │ Coder      on-demand    │ edits code in temp git worktree         │
-  │ Critic     auto         │ reviews all agent output before commit  │
-  └──────────────────────────────────────────────────────────────────┘
+  │ Researcher on-demand    │ web/file search, multi-step ReAct loop   │
+  │ Coder      on-demand    │ edits code in temp git worktree          │
+  │ Critic     auto         │ reviews all agent output before commit   │
+  └────────────────────────────────────────────────────────────────────┘
 
 All sub-agents write to blackboard.
 Primary mind reads blackboard on every turn.
@@ -296,15 +296,15 @@ Feedback loop: tracks accepted/rejected/ignored per category.
 ### Phase 7 — Federation
 
 ```
-ARISE Identity ────────────── survives device hops ───────────────────┐
+ARISE Identity ────────────── survives device hops ─────────────────────┐
 │                                                                       │
 │  Desktop shard           Phone shard           Second screen          │
 │  (primary mind)          (Tailscale/MQTT)       (ambient display)     │
-│       │                       │                       │              │
-│       └───────── shared blackboard (MQTT) ────────────┘              │
+│       │                       │                       │               │
+│       └───────── shared blackboard (MQTT) ────────────┘               │
 │                                                                       │
 │  Same memory cortex. Same goal stack. Same identity.                  │
-│  Lock your laptop → phone shard picks up the conversation.           │
+│  Lock your laptop → phone shard picks up the conversation.            │
 └───────────────────────────────────────────────────────────────────────┘
 
 Security: Tailscale-only by default, mTLS, per-device tokens, full audit log.

@@ -370,6 +370,8 @@ Manual escape: `arise rollback-adapter`
 
 ---
 
+<div align="center">
+
 ## 🌅 What a Day With ARISE Looks Like
 
 ```
@@ -422,25 +424,6 @@ Wednesday morning: a slightly sharper version of the same partner.
 ```
 
 ---
-
-<div align="center">
-
-## The Closing Argument
-
-```
-ARIA was reactive.
-ARISE thinks before you ask.
-
-ARIA had a toolset.
-ARISE writes its own.
-
-ARIA ran on your machine.
-ARISE lives in it.
-
-This is ARISE.3.0.
-Built on Arch. Runs local. Zero cloud.
-Yours, completely.
-```
 
 <br>
 

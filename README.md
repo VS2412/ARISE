@@ -37,7 +37,7 @@
 ARIA ──────────────────────────────────────────────────────────────── ARISE
  │                                                                      │
  │  voice-controlled executor                                           │  cognitive operating system
- │  reactive: user speaks → tool fires → reply                         │  proactive: perceives, reasons, speaks first
+ │  reactive: user speaks → tool fires → reply                          │  proactive: perceives, reasons, speaks first
  │  forgets emotional context between sessions                          │  five-layer memory cortex that survives reboots
  │  single-conversation planner                                         │  multi-day goal stack with deadlines + deps
  │  toolset hard-coded at compile time                                  │  forges its own tools in a sandbox

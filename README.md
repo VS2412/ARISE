@@ -466,32 +466,6 @@ Wednesday morning: a slightly sharper version of the same partner.
 
 ---
 
-## 🗂️ File Structure
-
-```
-~/.arise/
-├── memory/
-│   ├── episodic.db
-│   ├── semantic.db
-│   ├── procedural.db
-│   ├── preferences.db
-│   └── identity/          (git-versioned identity.json)
-├── goals/
-│   └── goals.db
-├── tools/
-│   ├── builtin/
-│   ├── learned/
-│   │   └── manifest.json
-│   └── sandbox/
-├── adapters/              (LoRA checkpoints)
-├── perception/            (frame cache, scene event log)
-├── vault/                 (SQLCipher-encrypted sensitive memory)
-└── logs/
-    └── audit.log
-```
-
----
-
 <div align="center">
 
 ## The Closing Argument

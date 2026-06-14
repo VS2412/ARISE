@@ -353,25 +353,6 @@ Manual escape: `arise rollback-adapter`
 
 ---
 
-## 🗓️ Build Schedule
-
-| Day | Phase | What Got Built | Hours |
-|-----|-------|----------------|-------|
-| 1-3 | 1 | Memory Cortex — identity, mood, five-type memory | 12h |
-| 4-6 | 2 | Continuous Perception — vision, audio, system sampler | 14h |
-| 7-9 | 3 | Goal Stack — durable, reboot-surviving, dependency-aware | 12h |
-| 10-13 | 4 | Cognitive Orchestrator + 5 sub-agents | 16h |
-| 14-16 | 5 | Tool Forge — sandboxed self-extension | 12h |
-| 17-19 | 6 | Proactive Companion — speaks first, learns from feedback | 10h |
-| 20-22 | 7 | Federation — phone + MQTT + second-screen | 14h |
-| 23-25 | 8 | Voice & Persona — Sesame CSM, mood-aware delivery | 10h |
-| 26-28 | 9 | Self-Improvement — nightly LoRA fine-tuning | 12h |
-| 29-30 | 10 | Privacy Vault — SQLCipher, audit log, lock-screen kill switch | 10h |
-
-**Total: ~122 hours across 30 working days.**
-
----
-
 ## 🛡️ Risk Register
 
 | Risk | Mitigation |
@@ -386,30 +367,6 @@ Manual escape: `arise rollback-adapter`
 | Proactive engine gets annoying | Feedback loop adapts thresholds, quiet hours, per-category mute |
 | 6GB VRAM insufficient | Sub-agents + voice on CPU, LoRA training scheduled never concurrent |
 | Lock screen exposes sensitive memory | SQLCipher at rest, lock-screen kill switch, vault redaction at write time |
-
----
-
-## 📦 Dependencies (Beyond ARIA)
-
-```bash
-# Arch Linux (pacman)
-pacman -S bubblewrap shellcheck mosquitto sqlcipher
-
-# Python (venv)
-pip install transformers peft accelerate fastapi uvicorn kokoro chatterbox-tts
-
-# Ollama models
-ollama pull qwen3:8b
-ollama pull qwen3:0.5b
-ollama pull nomic-embed-text
-ollama pull moondream
-
-# Build from source
-git clone https://github.com/asg017/sqlite-vec   # vector search
-# llama.cpp (CPU-only build for moondream)
-# YAMNet ONNX (~17MB, from HuggingFace)
-# Sesame CSM (expressive TTS, from HuggingFace)
-```
 
 ---
 

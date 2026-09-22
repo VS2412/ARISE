@@ -1,0 +1,11 @@
+services:
+  # ── test: build the Arch Linux container and run GTest via CTest ───────────
+  test:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: arise-test:latest
+    container_name: arise_unit_tests
+    # Streams test output directly to your terminal
+    stdin_open: false
+    tty: false

@@ -1,0 +1,71 @@
+name: CI — Build & Test (Arch Linux)
+
+# ── Triggers ──────────────────────────────────────────────────────────────────
+# Run on every push to any branch and on every pull request targeting main.
+# This ensures no broken code can be merged without passing the test suite.
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: [main, "ARISE.3.0"]
+
+# ── Jobs ──────────────────────────────────────────────────────────────────────
+jobs:
+  build-and-test:
+    name: Build & Test in Arch Linux Container
+    runs-on: ubuntu-latest  # GitHub-hosted runner; Docker runs Arch Linux inside
+
+    steps:
+      # ── 1. Checkout source code ─────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. Set up Docker Buildx for efficient layer caching ─────────────────
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # ── 3. Cache Docker layers to speed up repeated CI runs ─────────────────
+      # The cache key includes the Dockerfile hash, so any change to the
+      # Dockerfile or the pinned base image digest invalidates the cache.
+      - name: Cache Docker layers
+        uses: actions/cache@v4
+        with:
+          path: /tmp/.buildx-cache
+          key: ${{ runner.os }}-buildx-${{ hashFiles('Dockerfile') }}
+          restore-keys: |
+            ${{ runner.os }}-buildx-
+
+      # ── 4. Build the Arch Linux Docker image ────────────────────────────────
+      - name: Build Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: false       # we only build; we do not push to a registry
+          load: true        # load the image into the local Docker daemon
+          tags: arise-test:ci
+          cache-from: type=local,src=/tmp/.buildx-cache
+          cache-to:   type=local,dest=/tmp/.buildx-cache-new,mode=max
+
+      # ── 5. Move cache to prevent unbounded growth ───────────────────────────
+      # docker/build-push-action writes to a temp dir; move it to the real cache
+      - name: Rotate cache
+        run: |
+          rm -rf /tmp/.buildx-cache
+          mv /tmp/.buildx-cache-new /tmp/.buildx-cache
+
+      # ── 6. Run the full CTest suite inside the container ────────────────────
+      # The container's default CMD already runs ctest --output-on-failure.
+      # We override with an explicit command to capture the exit code correctly.
+      - name: Run unit tests
+        run: |
+          docker run --rm arise-test:ci \
+            ctest --output-on-failure --test-dir /arise/build
+
+      # ── 7. Upload test results on failure ───────────────────────────────────
+      # If tests fail, extract the CTest log so it is visible in the GitHub UI
+      # without having to rebuild the container locally.
+      - name: Upload CTest log on failure
+        if: failure()
+        run: |
+          docker run --rm arise-test:ci \
+            cat /arise/build/Testing/Temporary/LastTest.log
